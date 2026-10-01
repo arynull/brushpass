@@ -1,6 +1,6 @@
-# .gitignore — brushpass (local-only files are NEVER pushed)
+# brushpass — files not part of the distribution
 
-# --- internal ops files (standing user rule) ---
+# project docs (kept alongside the repo, not published)
 MISSION.md
 RUNBOOK.md
 SPEC.md
@@ -8,14 +8,15 @@ PROGRESS.md
 ERROR_LOG.md
 prompts/
 
-# --- tests are local-only (standing user rule) ---
+# local test suite (not published)
 tests/
 smoke.sh
 
-# --- secrets ---
+# local secrets and scratch config
 .telegram.env
+.gate.env
 
-# --- python ---
+# python
 __pycache__/
 *.py[cod]
 *.egg-info/
