@@ -200,7 +200,7 @@ from your environment crosses over.
 
 ```console
 $ brushpass mint --scope 'github:rayanalpha/*:read' --ttl 4h --label supervisor
-Token: bp_7Kq2mNpX4vR8tL1wY6bE3gH5jK9zQ7sF2dA4cU0oI6nMx
+Token: bp_EXAMPLE_TOKEN_HEREMx
 ID: 7b59e883
 Scope: github:rayanalpha/*:read
 Label: supervisor
@@ -659,7 +659,7 @@ $ grep -r 'OLD-root-credential-value-000' ~/.brushpass
 
 $ brushpass mint --scope github:rayanalpha/brushpass:read --ttl 2h \
       --credential ci-deploy --label 'release agent'
-Token: bp_nkbFoDBYVOs9VEIRJsv8ZkMPQYSjgJBQulmTgx_RxD0
+Token: bp_EXAMPLE_TOKEN_HERE
 ID: a3e5b5f2
 Scope: github:rayanalpha/brushpass:read
 Label: release agent
