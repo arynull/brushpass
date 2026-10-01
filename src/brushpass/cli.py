@@ -3,11 +3,30 @@
 
 import argparse
 import json
+import os
 import sys
 from datetime import UTC, datetime
 
 from . import __version__
 from .config import Config
+from .envout import (
+    ENV_FORMATS,
+    FORMAT_EXPORT,
+    SECRET_WARNING,
+    EnvError,
+    find_live_by_token,
+    render,
+    require_live_by_id,
+)
+from .handoff import (
+    TOKEN_ENV_VAR,
+    TOKEN_ID_ENV_VAR,
+    HandoffError,
+    build_child_env,
+    mint_handoff_token,
+    run_handoff,
+    validate_keep_env,
+)
 from .models import TokenRecord
 from .scope import Scope, ScopeError
 from .store import TokenStore
@@ -82,6 +101,58 @@ def create_parser() -> argparse.ArgumentParser:
     )
     prune_parser.add_argument(
         "--json", action="store_true", help="Output as JSON"
+    )
+
+    # handoff command
+    handoff_parser = subparsers.add_parser(
+        "handoff",
+        help="Mint a scoped token, run an agent with it, revoke on exit",
+    )
+    handoff_parser.add_argument(
+        "--scope", required=True, help="Scope for the token (provider:resource:permission)"
+    )
+    handoff_parser.add_argument(
+        "--ttl", default=None, help="Time-to-live (e.g., 30m, 2h). Default: 2h, Max: 24h"
+    )
+    handoff_parser.add_argument(
+        "--label", default=None, help="Optional label for the token"
+    )
+    handoff_parser.add_argument(
+        "--parent",
+        default=None,
+        help="Parent token ID to derive from; the new scope may only narrow it",
+    )
+    handoff_parser.add_argument(
+        "--keep-env",
+        action="append",
+        default=[],
+        metavar="VAR",
+        help="Pass a parent env var through to the agent (repeatable)",
+    )
+    handoff_parser.add_argument(
+        "agent",
+        nargs=argparse.REMAINDER,
+        help="Agent command after '--' (e.g. -- my-agent --flag)",
+    )
+
+    # env command
+    env_parser = subparsers.add_parser(
+        "env", help="Print token material in shell format"
+    )
+    env_parser.add_argument(
+        "--id", dest="token_id", default=None, help="Token ID (see note below)"
+    )
+    env_parser.add_argument(
+        "--format",
+        choices=ENV_FORMATS,
+        default=FORMAT_EXPORT,
+        help="Output format (default: export)",
+    )
+    env_parser.add_argument(
+        "--token",
+        dest="token",
+        default=None,
+        help="Plaintext token; resolves the record for liveness checks",
     )
 
     return parser
@@ -237,6 +308,7 @@ def cmd_list(args: argparse.Namespace, config: Config, store: TokenStore) -> int
                     "id": r.id,
                     "scope": r.scope,
                     "label": r.label,
+                    "parent_id": r.parent_id,
                     "issued_at": r.issued_at.isoformat(),
                     "expires_at": r.expires_at.isoformat(),
                     "expires_in": format_expiry(r.expires_at, now),
@@ -301,6 +373,120 @@ def cmd_prune(args: argparse.Namespace, config: Config, store: TokenStore) -> in
     return 0
 
 
+def cmd_handoff(args: argparse.Namespace, config: Config, store: TokenStore) -> int:
+    """Mint a scoped token, run an agent with it, revoke on exit."""
+    # Split the leading '--' argparse leaves in REMAINDER.
+    agent_cmd = [a for a in (args.agent or []) if a != "--"]
+    if not agent_cmd:
+        print(
+            "Error: no agent command given. Usage: "
+            "brushpass handoff --scope <scope> --ttl 2h --label <label> -- <agent-cmd>",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        scope = Scope.parse(args.scope)
+    except ScopeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    ttl_str = args.ttl or config.default_ttl
+    try:
+        ttl_delta = parse_ttl(ttl_str)
+    except TTLError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    # Validate --keep-env before minting anything: a bad request must not
+    # leave a live token behind.
+    try:
+        keep = validate_keep_env(args.keep_env)
+    except HandoffError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        session, parent = mint_handoff_token(
+            store,
+            scope=scope,
+            ttl_delta=ttl_delta,
+            label=args.label,
+            parent_id=args.parent,
+        )
+    except HandoffError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        child_env = build_child_env(
+            os.environ, session.plaintext, session.token_id, keep
+        )
+    except HandoffError as e:
+        # Could not build the environment; never leave the token live.
+        store.revoke(session.token_id)
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    print(f"Handoff: token {session.token_id} (scope {session.record.scope})")
+    if parent is not None:
+        print(f"Derived from parent token {parent.id} ({parent.scope})")
+    print(f"Expires: {session.record.expires_at.isoformat()}")
+    print(f"Running: {' '.join(agent_cmd)}")
+    if session.ttl_capped_by_parent:
+        print("TTL capped to the parent token's expiry.")
+    print(f"{TOKEN_ENV_VAR} and {TOKEN_ID_ENV_VAR} are injected; parent env is scrubbed.")
+    print()
+
+    return run_handoff(
+        store, session, agent_cmd, child_env, notify=_stderr_notify
+    )
+
+
+def _stderr_notify(message: str) -> None:
+    print(message, file=sys.stderr)
+
+
+def cmd_env(args: argparse.Namespace, config: Config, store: TokenStore) -> int:
+    """Print token material in shell format."""
+    if not args.token and not args.token_id:
+        print(
+            "Error: supply --token <plaintext> or --id <token-id>",
+            file=sys.stderr,
+        )
+        return 1
+
+    now = datetime.now(UTC)
+    try:
+        if args.token:
+            record = find_live_by_token(store, args.token, now)
+        else:
+            # --id alone can confirm liveness but cannot re-emit the
+            # plaintext: storage holds hashes only, by design.
+            record = require_live_by_id(store, args.token_id, now)
+            print(
+                f"Error: token {record.id} is live, but brushpass stores only "
+                "hashes, so it cannot reprint the token. Pass the plaintext "
+                "with --token, or use 'brushpass handoff' to inject one.",
+                file=sys.stderr,
+            )
+            return 1
+        plaintext = args.token
+    except EnvError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        output = render(record, plaintext, args.format)
+    except EnvError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    print(SECRET_WARNING, file=sys.stderr)
+    print(output, end="")
+    return 0
+
+
 def main() -> int:
     """Main entry point."""
     parser = create_parser()
@@ -321,6 +507,8 @@ def main() -> int:
         "list": cmd_list,
         "revoke": cmd_revoke,
         "prune": cmd_prune,
+        "handoff": cmd_handoff,
+        "env": cmd_env,
     }
 
     handler = commands.get(args.command)

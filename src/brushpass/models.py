@@ -17,6 +17,7 @@ class TokenRecord:
     issued_at: datetime
     expires_at: datetime
     revoked: bool = False
+    parent_id: str | None = None  # Set when derived via `handoff --parent`
 
     @classmethod
     def create(
@@ -26,6 +27,7 @@ class TokenRecord:
         label: str | None,
         issued_at: datetime,
         expires_at: datetime,
+        parent_id: str | None = None,
     ) -> tuple["TokenRecord", str]:
         """Create a new token record. Returns (record, plaintext_token)."""
         token_hash = hashlib.sha256(plaintext_token.encode()).hexdigest()
@@ -39,6 +41,7 @@ class TokenRecord:
             issued_at=issued_at,
             expires_at=expires_at,
             revoked=False,
+            parent_id=parent_id,
         ), plaintext_token
 
     @staticmethod
@@ -63,6 +66,7 @@ class TokenRecord:
             "issued_at": self.issued_at.isoformat(),
             "expires_at": self.expires_at.isoformat(),
             "revoked": self.revoked,
+            "parent_id": self.parent_id,
         }
 
     @classmethod
@@ -76,4 +80,5 @@ class TokenRecord:
             issued_at=datetime.fromisoformat(data["issued_at"]),
             expires_at=datetime.fromisoformat(data["expires_at"]),
             revoked=data.get("revoked", False),
+            parent_id=data.get("parent_id"),
         )
