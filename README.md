@@ -29,7 +29,7 @@ pip install -e .
 brushpass mint --scope github:rayanalpha/*:read --label "CI agent"
 
 # Verify a token (used by your application)
-brushpass verify bp_xK9... --scope github:rayanalpha/repo:read
+brushpass verify bp_EXAMPLE… --scope github:rayanalpha/repo:read
 
 # List all tokens
 brushpass list
@@ -46,6 +46,12 @@ brushpass prune
 
 # Find out whether any of your tokens leaked, and revoke what is still live
 brushpass scan ~/projects --fix
+
+# Check the audit log has not been tampered with
+brushpass audit verify
+
+# Emergency: revoke every live token (plan first, then --yes)
+brushpass nuke
 ```
 
 ## Commands
@@ -79,7 +85,7 @@ brushpass mint --scope stripe:customers:read --ttl 30m
 **Output:**
 
 ```
-Token: bp_xK9mN2pQ8sT3vW5yZ7aB9cD1eF3gH5jK7lM9nO1p
+Token: bp_EXAMPLE_TOKEN_HERE
 ID: abc12345
 Scope: github:rayanalpha/*:read
 Label: CI agent
@@ -106,16 +112,16 @@ brushpass verify <token> --scope <required-scope>
 
 ```bash
 # Check if token has read access to a specific repo
-brushpass verify bp_xK9... --scope github:rayanalpha/specific-repo:read
+brushpass verify bp_EXAMPLE… --scope github:rayanalpha/specific-repo:read
 
 # Check for write access (will fail if token only has read)
-brushpass verify bp_xK9... --scope github:rayanalpha/repo:write
+brushpass verify bp_EXAMPLE… --scope github:rayanalpha/repo:write
 ```
 
 **JSON output:**
 
 ```bash
-brushpass verify bp_xK9... --scope github:rayanalpha/repo:read --json
+brushpass verify bp_EXAMPLE… --scope github:rayanalpha/repo:read --json
 ```
 
 ```json
@@ -368,33 +374,33 @@ brushpass env --id <token-id> [--format export|json|powershell]
 
 ```console
 $ brushpass mint --scope stripe:customers:read --ttl 30m
-Token: bp_xK9mN2pQ8sT3vW5yZ7aB9cD1eF3gH5jK7lM9nO1pQ
+Token: bp_EXAMPLE_TOKEN_HERE
 ID: a1b2c3d4
 ...
 
-$ brushpass env --token bp_xK9mN2pQ8sT3vW5yZ7aB9cD1eF3gH5jK7lM9nO1pQ
+$ brushpass env --token bp_EXAMPLE_TOKEN_HERE
 Warning: this output contains secret token material. Prefer
 'brushpass handoff', which revokes the token when the agent exits.
-export BRUSHPASS_TOKEN='bp_xK9mN2pQ8sT3vW5yZ7aB9cD1eF3gH5jK7lM9nO1pQ'
+export BRUSHPASS_TOKEN='bp_EXAMPLE_TOKEN_HERE'
 export BRUSHPASS_TOKEN_ID='a1b2c3d4'
 
-$ eval "$(brushpass env --token bp_xK9...)"
+$ eval "$(brushpass env --token bp_EXAMPLE…)"
 ```
 
 PowerShell:
 
 ```console
-PS> brushpass env --token bp_xK9... --format powershell
-$env:BRUSHPASS_TOKEN='bp_xK9mN2pQ8sT3vW5yZ7aB9cD1eF3gH5jK7lM9nO1pQ'
+PS> brushpass env --token bp_EXAMPLE… --format powershell
+$env:BRUSHPASS_TOKEN='bp_EXAMPLE_TOKEN_HERE'
 $env:BRUSHPASS_TOKEN_ID='a1b2c3d4'
 ```
 
 JSON:
 
 ```console
-$ brushpass env --token bp_xK9... --format json
+$ brushpass env --token bp_EXAMPLE… --format json
 {
-  "BRUSHPASS_TOKEN": "bp_xK9mN2pQ8sT3vW5yZ7aB9cD1eF3gH5jK7lM9nO1pQ",
+  "BRUSHPASS_TOKEN": "bp_EXAMPLE_TOKEN_HERE",
   "BRUSHPASS_TOKEN_ID": "a1b2c3d4",
   "scope": "stripe:customers:read",
   "label": null,
@@ -773,6 +779,242 @@ No secret material is ever written there. `old_secret_id` and
 `orphan_secret_id` are truncated SHA-256 digests, which let you confirm
 *which* secret is in play without being able to recover it.
 
+## Audit
+
+Everything security-relevant brushpass does is written to
+`~/.brushpass/audit.log` (mode `0600`) as JSON Lines: a token minted or
+revoked, a token that expired and was pruned, a verify that was refused,
+a leak found on disk, a credential added or removed, a rotation starting
+and finishing, a nuke.
+
+```bash
+brushpass audit verify          # replay the chain, exit non-zero on tamper
+brushpass audit log             # the last 50 records
+brushpass audit log --event token.revoke --since 24h --tail 10
+```
+
+### A record
+
+```json
+{"seq": 4, "ts_utc": "2026-10-01T20:31:04.118472+00:00", "event": "token.revoke", "details": {"token_id": "a3e5b5f2"}, "prev_hash": "b776e2752f0121830e5d851a6f9035703f72f5d176999ab55ab5d37e7f1e8f14", "record_hash": "4f1c…", "signature": "kQ8B…"}
+```
+
+`details` carries ids, labels, scopes, fingerprints and digests — never
+token plaintext. That is enforced, not merely intended: `record()` walks
+the details and refuses anything shaped like a token, so "do not log
+secrets" cannot be broken by a careless call site.
+
+### What the chain proves
+
+Each record is chained and signed. `record_hash` is SHA-256 over the
+canonical JSON of the record with `prev_hash` **inside** the preimage, so
+a record commits to its own position; `prev_hash` links it to the one
+before; `signature` is Ed25519 over the hash under `~/.brushpass/audit.key`.
+
+`audit verify` replays from seq 0 and reports the **first** broken seq —
+the only number an incident responder needs.
+
+```console
+$ brushpass audit verify
+OK (128 records)
+
+$ brushpass audit verify
+TAMPERED: record 64: record_hash does not match its contents (stored 4f1c8a…, computed 9b2e07…)
+Every record from this point on is unreliable. Restore the log from a backup, or treat everything after it as unaccounted for
+```
+
+Now the honest part. This proves the log has not been altered **by anyone
+without `audit.key`**. The key sits in the same `0700` directory as the
+log, so this is tamper-evidence against disclosure of a single artefact,
+a leaked backup, or another account on the box — the same boundary the
+encrypted credential store draws. It does **not** prove the log is
+complete:
+
+- **Truncation is invisible locally.** An attacker who can rewrite the
+  file can drop the tail, and the remaining chain is still internally
+  consistent. Nothing in the file can detect it. To catch it, anchor the
+  head hash somewhere they cannot reach.
+- **Deletion is invisible locally.** Removing the log entirely looks
+  exactly like a fresh install. `audit verify` reports a missing log as
+  zero records, which is true of both. Check the file's *existence* in
+  your monitoring, not just its integrity.
+
+`audit log` prints the head hash of the last record shown for exactly
+this reason:
+
+```console
+$ brushpass audit log --tail 3
+63     2026-10-01T20:31:02.881+00:00  token.mint                  token_id=7b59e883 scope=github:repo:read label=supervisor epoch=2
+64     2026-10-01T20:31:04.118+00:00  token.revoke                token_id=a3e5b5f2
+65     2026-10-01T20:33:51.402+00:00  nuke                        tokens_revoked=2 epoch_before=2 epoch_after=3
+
+head: 4f1c8a9e77b0d3f5a1c2e8b6d0f4a9c3e7b1d5f8a2c6e0b4d9f3a7c1e5b8d2f6a
+(3 record(s); anchor the head hash out of band)
+```
+
+Ship that hash to a log collector or keep it in your own notes. Later,
+`audit verify` proves the log is still the log you anchored.
+
+### Filters
+
+`--event` takes one of the `EVENTS` values and is validated against the
+list — a typo is an error, not a silently empty result. `--since` takes
+`30s`, `15m`, `24h`, `7d`, `2w`. Both are applied **before** `--tail`, so
+`--event token.revoke --tail 5` is the last five revokes rather than the
+last five records of which some were revokes.
+
+### Verify successes are not logged
+
+Only denials are recorded. A successful verify writes nothing.
+
+This is a deliberate sampling choice. The log is a forensic record of
+things that were *refused* — the attempts an investigator wants — not
+traffic accounting. Successful verifies are the overwhelmingly common
+case and carry no information an investigator needs; logging them would
+roughly double the log's size and bury the denials, which is the exact
+failure mode of logging everything.
+
+Denials are logged on every path, including the one with no record to
+name:
+
+| Reason | Logged |
+|---|---|
+| `revoked` | `token_id` |
+| `stale_epoch` | `token_id`, `token_epoch`, `store_epoch` |
+| `expired` | `token_id` |
+| `scope_mismatch` | `token_id`, `granted_scope`, `required_scope` |
+| `unknown_token` | `fingerprint` (sha256 of what was presented) |
+
+An unknown token is exactly what an attacker produces, so it is worth
+recording; the sha256 lets you correlate repeated attempts without ever
+storing what was presented.
+
+Audit writes are **best effort**. A damaged or unwritable log prints
+`WARNING: audit write failed: …` and the operation continues — a mint
+still mints, a revoke still revokes. The log is where you look
+afterwards, not a gate that decides whether things happen.
+
+## Revocation epoch
+
+`tokens.json` carries an integer `revocation_epoch`, and every token
+records the generation it was minted in. A token whose generation is
+behind the store's is denied, in addition to the `revoked` flag and its
+expiry.
+
+**What bumps it:** every `revoke`, every rotation's token revocation, and
+`nuke` — exactly once per operation, not once per token. A break-glass
+retires a *generation*, and a caller reading the counter sees one
+consistent jump rather than a hundred.
+
+**Why it defeats stale caches.** A revoked *flag* is a per-token fact: it
+says "this one token is dead" and says nothing about any other. A broker
+that cached "this token is fine" stays wrong about every other token, and
+stays wrong until it happens to re-read. An epoch bump is a *generation*
+change: everything minted before it is behind the current generation, so
+one number retires a whole class of tokens. Nobody has to enumerate what
+was outstanding, which is the situation a break-glass exists for.
+
+```console
+$ brushpass verify bp_EXAMPLE_TOKEN_HERE --scope github:repo:read --json
+{"valid": false, "reason": "stale_epoch", "token_id": "a3e5b5f2", "token_epoch": 2, "store_epoch": 3}
+```
+
+The store is never cached: every public read re-reads the file. Two
+brushpass processes are two `TokenStore` objects with two separate memory
+maps, and a revoke in one is visible to a verify in the other on the very
+next call — no signal, no IPC, no shared object.
+
+**Pre-epoch tokens.** Tokens minted before v0.5.0 have no generation
+stamp and count as generation 0. That is the safe direction: they verify
+normally until the first bump, and the first bump retires them. Upgrading
+the version does not by itself kill anything; the next revoke does.
+
+## nuke — the break-glass
+
+> ### ⚠️ `brushpass nuke --yes` revokes **every live token**, everywhere
+>
+> This is not scoped to one credential, one label, or one token. It is
+> the "a credential is in someone else's hands and I do not have time to
+> work out which" button, and it kills all of them. There is no undo:
+> tokens must be re-minted, and any in-flight job holding one fails.
+>
+> It also **does not revoke anything upstream**. brushpass kills its own
+> tokens; the long-lived provider secret dies only when the provider is
+> told. A clean exit here is not "the credential is gone".
+
+```bash
+brushpass nuke               # prints the plan, changes nothing, exits non-zero
+brushpass nuke --yes         # do it
+brushpass nuke --yes --rotate-all   # and attempt a real provider rotation
+```
+
+`--yes` is **required**. There is no interactive prompt, deliberately:
+the one situation where a prompt is dangerous is the one where brushpass
+is run from a script or a cron job with nobody watching, and there an
+unattended `input()` either blocks forever or reads the next line of
+somebody else's stdin. Without `--yes` you get the plan and a non-zero
+exit:
+
+```console
+$ brushpass nuke
+======================================================================
+NUKE PLAN (nothing changed)
+======================================================================
+Live tokens to revoke (2): a3e5b5f2, 7b59e883
+Revocation epoch: 2 -> 3
+Credentials to flag for rotation (1): ci-deploy
+======================================================================
+```
+
+With `--yes`, the same header prints first, then what happened:
+
+```console
+$ brushpass nuke --yes
+======================================================================
+NUKE
+======================================================================
+Live tokens to revoke (2): a3e5b5f2, 7b59e883
+Revocation epoch: 2 -> 3
+Credentials to flag for rotation (1): ci-deploy
+
+This is not reversible and it is not specific to one credential.
+brushpass kills its own tokens; the upstream secrets die only when the
+provider is told. Every credential above needs a rotation, not just a token revoke.
+======================================================================
+
+NUKE COMPLETE
+  Tokens revoked:   2
+  Token ids:        a3e5b5f2, 7b59e883
+  Epoch:            2 -> 3
+  Flagged to rotate: 1 (ci-deploy)
+
+Every token minted before this call is now behind the current epoch
+and will be denied, whatever its own revoked flag says.
+Upstream credentials are NOT revoked by this command:
+  brushpass rotate ci-deploy
+```
+
+What it does, in order:
+
+1. Revokes every live token and advances the epoch by one, so anything
+   still holding a pre-nuke token is denied even if it cannot enumerate
+   ids.
+2. Writes a "rotation required" journal entry for every root credential.
+   brushpass cannot rotate a credential it has not been told how to reach,
+   so it does not pretend to: the journal records the obligation and
+   `rotate --status` surfaces it until a human clears it.
+3. `--rotate-all` then attempts a real provider rotation per credential.
+   A `manual` credential prints its instructions and is **skipped with a
+   warning** unless stdin is a TTY — an unattended nuke must never block
+   on a prompt nobody is there to answer.
+4. Writes one `nuke` audit record naming what was retired, so
+   `audit verify` still passes afterwards and the break-glass itself is
+   on the record.
+
+Only the token revocation is fatal. If the journal or audit write fails,
+you get a warning and the tokens stay dead — being dead is the part that
+mattered.
+
 ## Providers
 
 A provider is the only part of brushpass that talks to a third-party
@@ -1042,6 +1284,7 @@ All verification failures return a non-zero exit code:
 - Expired token → deny
 - Revoked token → deny
 - Scope mismatch → deny
+- Token from a retired generation (`stale_epoch`) → deny
 
 ### File Permissions
 
@@ -1058,10 +1301,13 @@ All data is stored locally in `~/.brushpass/` (or `$BRUSHPASS_DATA_DIR`):
 ```
 ~/.brushpass/
 ├── config.yaml         # Configuration
-├── tokens.json         # Token records (hashes only, mode 0600)
+├── tokens.json         # Token records + revocation_epoch (hashes only, mode 0600)
 ├── credentials.json    # Root credentials, Fernet-encrypted (mode 0600)
 ├── credentials.key     # Credential data key (mode 0600)
-└── journal.jsonl       # Append-only rotation journal (mode 0600)
+├── scanner.key         # Token fingerprinting key (mode 0600)
+├── journal.jsonl       # Append-only rotation journal (mode 0600)
+├── audit.log           # Hash-chained, Ed25519-signed audit log (mode 0600)
+└── audit.key           # Audit signing key, Ed25519 seed (mode 0600)
 ```
 
 ## License
