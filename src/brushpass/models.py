@@ -28,6 +28,12 @@ class TokenRecord:
     # every live token carrying the label; a token minted without one is
     # untethered and survives rotations (documented in the README).
     credential_label: str | None = None
+    # Revocation generation this token was minted in, stamped by
+    # TokenStore.add. None means "before v0.5.0", which the store reads
+    # as generation 0 — so the first epoch bump retires it. A token
+    # whose epoch differs from the store's is denied even when its
+    # revoked flag is still False.
+    epoch: int | None = None
 
     @classmethod
     def create(
@@ -83,6 +89,7 @@ class TokenRecord:
             "parent_id": self.parent_id,
             "fingerprint": self.fingerprint,
             "credential_label": self.credential_label,
+            "epoch": self.epoch,
         }
 
     @classmethod
@@ -104,4 +111,16 @@ class TokenRecord:
             # Absent on tokens minted before v0.4.0, which predate
             # credential linkage and so belong to no rotation.
             credential_label=data.get("credential_label"),
+            # Absent on tokens minted before v0.5.0, which predate the
+            # generation counter. None, not 0: the store decides what
+            # generation a record with no stamp counts as, so a bump can
+            # retire the whole pre-epoch population.
+            epoch=data.get("epoch"),
         )
+
+    @property
+    def effective_epoch(self) -> int:
+        """This token's generation, with pre-epoch tokens counting as 0."""
+        from .store import LEGACY_EPOCH
+
+        return LEGACY_EPOCH if self.epoch is None else self.epoch
