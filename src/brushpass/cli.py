@@ -6,6 +6,7 @@ import json
 import os
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 
 from . import __version__
 from .config import Config
@@ -28,9 +29,24 @@ from .handoff import (
     validate_keep_env,
 )
 from .models import TokenRecord
+from .scan import (
+    ScanError,
+    collect_blobs,
+    exit_code,
+    fix_findings,
+    render_json,
+    render_text,
+    scan_blobs,
+)
+from .scanner import Scanner, ScannerKeyError, load_scanner
 from .scope import Scope, ScopeError
+from .sources import ScanSourceError
 from .store import TokenStore
 from .ttl import TTLError, format_expiry, parse_ttl
+
+# Commands that mint or match token material, and therefore need the
+# scanner key that fingerprints it.
+SCANNER_COMMANDS = frozenset({"mint", "handoff", "scan"})
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -135,6 +151,36 @@ def create_parser() -> argparse.ArgumentParser:
         help="Agent command after '--' (e.g. -- my-agent --flag)",
     )
 
+    # scan command
+    scan_parser = subparsers.add_parser(
+        "scan", help="Scan files, git history and shell history for leaked tokens"
+    )
+    scan_parser.add_argument(
+        "paths",
+        nargs="*",
+        metavar="path",
+        help="Files or directories to scan recursively (default: current directory)",
+    )
+    scan_parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="Revoke every live leaked token found",
+    )
+    scan_parser.add_argument(
+        "--git",
+        action="store_true",
+        help=(
+            "Also scan git history (log -p --all), staged and unstaged "
+            "diffs, and untracked worktree files"
+        ),
+    )
+    scan_parser.add_argument(
+        "--history",
+        action="store_true",
+        help="Also scan shell history files (honours $HISTFILE)",
+    )
+    scan_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
     # env command
     env_parser = subparsers.add_parser(
         "env", help="Print token material in shell format"
@@ -158,7 +204,28 @@ def create_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def cmd_mint(args: argparse.Namespace, config: Config, store: TokenStore) -> int:
+def _require_scanner(scanner: Scanner | None) -> Scanner:
+    """Return the loaded scanner key.
+
+    ``main`` loads the key for every command in ``SCANNER_COMMANDS`` and
+    fails closed if it is unusable, so a mint that reaches this point
+    always has one. Minting without it would produce tokens that no future
+    scan could recognise, which is worse than not minting at all.
+    """
+    if scanner is None:  # pragma: no cover - unreachable via main()
+        raise ScanError(
+            "Internal error: no scanner key loaded for a minting command. "
+            "The scanner key is required to fingerprint new tokens"
+        )
+    return scanner
+
+
+def cmd_mint(
+    args: argparse.Namespace,
+    config: Config,
+    store: TokenStore,
+    scanner: Scanner | None,
+) -> int:
     """Mint a new token."""
     try:
         # Parse and validate scope
@@ -189,6 +256,7 @@ def cmd_mint(args: argparse.Namespace, config: Config, store: TokenStore) -> int
         label=args.label,
         issued_at=now,
         expires_at=expires_at,
+        fingerprint=_require_scanner(scanner).fingerprint(plaintext),
     )
 
     # Store the record
@@ -219,7 +287,12 @@ def cmd_mint(args: argparse.Namespace, config: Config, store: TokenStore) -> int
     return 0
 
 
-def cmd_verify(args: argparse.Namespace, config: Config, store: TokenStore) -> int:
+def cmd_verify(
+    args: argparse.Namespace,
+    config: Config,
+    store: TokenStore,
+    scanner: Scanner | None,
+) -> int:
     """Verify a token."""
     # Parse required scope
     try:
@@ -296,7 +369,12 @@ def cmd_verify(args: argparse.Namespace, config: Config, store: TokenStore) -> i
     return 0
 
 
-def cmd_list(args: argparse.Namespace, config: Config, store: TokenStore) -> int:
+def cmd_list(
+    args: argparse.Namespace,
+    config: Config,
+    store: TokenStore,
+    scanner: Scanner | None,
+) -> int:
     """List all tokens."""
     records = store.list_all()
     now = datetime.now(UTC)
@@ -336,7 +414,12 @@ def cmd_list(args: argparse.Namespace, config: Config, store: TokenStore) -> int
     return 0
 
 
-def cmd_revoke(args: argparse.Namespace, config: Config, store: TokenStore) -> int:
+def cmd_revoke(
+    args: argparse.Namespace,
+    config: Config,
+    store: TokenStore,
+    scanner: Scanner | None,
+) -> int:
     """Revoke a token."""
     success = store.revoke(args.token_id)
 
@@ -355,7 +438,12 @@ def cmd_revoke(args: argparse.Namespace, config: Config, store: TokenStore) -> i
     return 0 if success else 1
 
 
-def cmd_prune(args: argparse.Namespace, config: Config, store: TokenStore) -> int:
+def cmd_prune(
+    args: argparse.Namespace,
+    config: Config,
+    store: TokenStore,
+    scanner: Scanner | None,
+) -> int:
     """Prune expired/revoked tokens."""
     count = store.prune()
 
@@ -373,7 +461,12 @@ def cmd_prune(args: argparse.Namespace, config: Config, store: TokenStore) -> in
     return 0
 
 
-def cmd_handoff(args: argparse.Namespace, config: Config, store: TokenStore) -> int:
+def cmd_handoff(
+    args: argparse.Namespace,
+    config: Config,
+    store: TokenStore,
+    scanner: Scanner | None,
+) -> int:
     """Mint a scoped token, run an agent with it, revoke on exit."""
     # Split the leading '--' argparse leaves in REMAINDER.
     agent_cmd = [a for a in (args.agent or []) if a != "--"]
@@ -413,6 +506,7 @@ def cmd_handoff(args: argparse.Namespace, config: Config, store: TokenStore) -> 
             ttl_delta=ttl_delta,
             label=args.label,
             parent_id=args.parent,
+            fingerprint_of=_require_scanner(scanner).fingerprint,
         )
     except HandoffError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -447,7 +541,12 @@ def _stderr_notify(message: str) -> None:
     print(message, file=sys.stderr)
 
 
-def cmd_env(args: argparse.Namespace, config: Config, store: TokenStore) -> int:
+def cmd_env(
+    args: argparse.Namespace,
+    config: Config,
+    store: TokenStore,
+    scanner: Scanner | None,
+) -> int:
     """Print token material in shell format."""
     if not args.token and not args.token_id:
         print(
@@ -487,6 +586,46 @@ def cmd_env(args: argparse.Namespace, config: Config, store: TokenStore) -> int:
     return 0
 
 
+def cmd_scan(
+    args: argparse.Namespace,
+    config: Config,
+    store: TokenStore,
+    scanner: Scanner | None,
+) -> int:
+    """Scan for leaked tokens across files, git history and shell history."""
+    scanner = _require_scanner(scanner)
+
+    # With --git or --history and no explicit paths, brushpass scans those
+    # sources only. Falling back to the whole working tree as well would be
+    # surprising and, on a large repo, slow.
+    if args.paths:
+        paths = [Path(p) for p in args.paths]
+    elif args.git or args.history:
+        paths = []
+    else:
+        paths = [Path.cwd()]
+    try:
+        report = scan_blobs(
+            collect_blobs(
+                paths,
+                git=args.git,
+                history=args.history,
+                state_dir=config.data_dir,
+            ),
+            store,
+            scanner,
+        )
+    except (ScanSourceError, ScanError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    if args.fix:
+        fix_findings(store, report)
+
+    print(render_json(report) if args.json else render_text(report))
+    return exit_code(report, fixed=args.fix)
+
+
 def main() -> int:
     """Main entry point."""
     parser = create_parser()
@@ -500,6 +639,18 @@ def main() -> int:
     config = Config()
     store = TokenStore(config.data_dir)
 
+    # Minting and matching both need the scanner key, which fingerprints
+    # the token so a later scan can recognise it. Fail closed if it is
+    # missing or too widely readable: minting without a fingerprint would
+    # produce tokens no scan could ever find.
+    scanner: Scanner | None = None
+    if args.command in SCANNER_COMMANDS:
+        try:
+            scanner = load_scanner(config.data_dir)
+        except ScannerKeyError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
     # Dispatch command
     commands = {
         "mint": cmd_mint,
@@ -509,11 +660,12 @@ def main() -> int:
         "prune": cmd_prune,
         "handoff": cmd_handoff,
         "env": cmd_env,
+        "scan": cmd_scan,
     }
 
     handler = commands.get(args.command)
     if handler:
-        return handler(args, config, store)
+        return handler(args, config, store, scanner)
     else:
         parser.print_help()
         return 1

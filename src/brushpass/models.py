@@ -18,6 +18,11 @@ class TokenRecord:
     expires_at: datetime
     revoked: bool = False
     parent_id: str | None = None  # Set when derived via `handoff --parent`
+    # HMAC-SHA256 of the plaintext under the scanner key, truncated. None
+    # for tokens minted before v0.3.0: they predate leak detection and
+    # cannot be matched by a scan. See scanner.py for why this is
+    # verifiable without storing the plaintext.
+    fingerprint: str | None = None
 
     @classmethod
     def create(
@@ -28,6 +33,7 @@ class TokenRecord:
         issued_at: datetime,
         expires_at: datetime,
         parent_id: str | None = None,
+        fingerprint: str | None = None,
     ) -> tuple["TokenRecord", str]:
         """Create a new token record. Returns (record, plaintext_token)."""
         token_hash = hashlib.sha256(plaintext_token.encode()).hexdigest()
@@ -42,6 +48,7 @@ class TokenRecord:
             expires_at=expires_at,
             revoked=False,
             parent_id=parent_id,
+            fingerprint=fingerprint,
         ), plaintext_token
 
     @staticmethod
@@ -67,6 +74,7 @@ class TokenRecord:
             "expires_at": self.expires_at.isoformat(),
             "revoked": self.revoked,
             "parent_id": self.parent_id,
+            "fingerprint": self.fingerprint,
         }
 
     @classmethod
@@ -81,4 +89,8 @@ class TokenRecord:
             expires_at=datetime.fromisoformat(data["expires_at"]),
             revoked=data.get("revoked", False),
             parent_id=data.get("parent_id"),
+            # Absent on tokens minted before v0.3.0; those stay unscannable
+            # rather than being back-filled with a fingerprint brushpass
+            # cannot compute (it has no plaintext to hash).
+            fingerprint=data.get("fingerprint"),
         )

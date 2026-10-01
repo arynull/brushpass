@@ -188,11 +188,19 @@ def mint_handoff_token(
     label: str | None = None,
     parent_id: str | None = None,
     now: datetime | None = None,
+    fingerprint_of: Callable[[str], str] | None = None,
 ) -> tuple[HandoffSession, TokenRecord | None]:
     """Mint the token a handoff will inject. Returns (session, parent).
 
     When ``parent_id`` is given the child's scope must be covered by the
     parent's scope and the child can never outlive the parent.
+
+    ``fingerprint_of`` maps a plaintext token to its leak-detection
+    fingerprint. It is injected rather than derived here so that
+    ``handoff`` keeps no knowledge of the scanner key: the plaintext is
+    created in this function, and the caller is the only party that needs
+    the key. When it is None the token is minted unscannable, which is
+    what the CLI avoids by always supplying it.
 
     Raises:
         HandoffError: if the parent is unusable or the scope widens.
@@ -217,6 +225,7 @@ def mint_handoff_token(
         issued_at=issued_at,
         expires_at=expires_at,
         parent_id=parent.id if parent else None,
+        fingerprint=fingerprint_of(plaintext) if fingerprint_of else None,
     )
     store.add(record)
     return HandoffSession(record=record, plaintext=plaintext, ttl_capped_by_parent=capped), parent

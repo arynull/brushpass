@@ -6,6 +6,8 @@ A local credential broker for AI agents. Mint short-lived, narrowly-scoped token
 
 brushpass generates ephemeral tokens with specific scopes and TTLs. Tokens are stored as SHA-256 hashes — the plaintext is shown once at mint time and never again. This limits exposure if a token leaks or an agent misbehaves.
 
+If a token does leak, `brushpass scan` finds it: every minted token carries a keyed fingerprint, so a scan can recognise a token it issued on your disk, in your git history, or in your shell history — and tell you exactly where, without ever printing the token.
+
 ## Installation
 
 ```bash
@@ -41,6 +43,9 @@ brushpass handoff --scope github:rayanalpha/brushpass:read --ttl 1h \
 
 # Clean up old expired/revoked tokens
 brushpass prune
+
+# Find out whether any of your tokens leaked, and revoke what is still live
+brushpass scan ~/projects --fix
 ```
 
 ## Commands
@@ -414,6 +419,104 @@ as intended. Use `--token`, or use `handoff`.
 **Prefer `handoff`.** `env` puts the token in *your* current shell, where
 it persists until the shell exits and is never automatically revoked.
 `handoff` scopes it to one subprocess and revokes it on exit.
+
+## Leak detection
+
+Every token minted by this version carries a keyed **fingerprint** — a
+truncated HMAC of the token, under a key stored alongside your records.
+That fingerprint is what a scan matches against, not the shape of the
+string. So a scan answers exactly one question: *did brushpass issue this?*
+A `bp_`-shaped string brushpass never minted is discarded in silence, and
+the report cannot be made to cry wolf.
+
+### scan
+
+```bash
+brushpass scan [path ...] [--git] [--history] [--fix] [--json]
+```
+
+**Arguments:**
+- `path`: files or directories to scan recursively. Default: the current
+  directory. The brushpass state directory is never scanned.
+- `--git`: also scan this repository — the commit log (`git log -p --all`),
+  the staged diff, the unstaged diff, and untracked worktree files
+- `--history`: also scan shell history files, honouring `$HISTFILE`
+- `--fix`: revoke every live leaked token found. Idempotent.
+- `--json`: machine-readable output
+
+**Exit codes:**
+- `0`: no live leaks (also after `--fix` — the credential is dead)
+- `2`: at least one live leak found, suitable for a CI gate
+- `1`: error (unreadable path, not a git repository, git missing)
+
+**What it looks for.** Three passes over each blob, then verification:
+
+| Detected by | What it catches |
+|-------------|-----------------|
+| `raw` | the token written out plainly |
+| `base64` | the token inside a pasted base64 payload (both alphabets, padding optional) |
+| `whitespace` | the token wrapped across lines, spaces or tabs |
+
+**Output:**
+
+```console
+$ brushpass scan ~/projects
+LEAKED TOKENS
+--------------------------------------------------------------------------------
+a1b2c3d4  github:rayanalpha/*:read  [LIVE]
+  label:       CI agent
+  fingerprint: 9f2c1a7be004...
+  location:    /home/you/projects/app/config.env:3 (via raw, source file)
+  issued_at:   2026-10-01T14:09:00+00:00
+  action:      revoke now
+
+Scanned 128 file(s) or stream(s); skipped 2 binary; 1 verified leak(s).
+1 live leak(s). Run 'brushpass scan --fix' to revoke them.
+```
+
+No token plaintext appears in the report, in either format, even for
+confirmed leaks. A skipped file is always counted in the summary — a quiet
+skip reads as an all-clear, and an all-clear that isn't one is worse than
+no scanner at all.
+
+Tokens minted before leak detection existed carry no fingerprint, so no
+scan can match them. Rather than ignore them, the report lists them as
+`UNSCANNABLE`; they still verify normally, and you can revoke one if you
+cannot account for where it went.
+
+#### Limitations
+
+brushpass matches tokens that are recognisable as tokens. It is a leak
+*finder*, not a defence against a determined obfuscator. These evasions
+are **not caught**, by design and by documented scope:
+
+- **A deliberately mangled copy — junk or non-whitespace characters
+  inserted between the token's characters.** The raw pass needs 43
+  contiguous characters; the whitespace pass removes whitespace only. So
+  `bp_AAAA…\x01\x02…ZZZZ` never reassembles and is not found.
+- **Double-encoded tokens.** Exactly one decode pass is applied, not a
+  recursive chase. base64(base64(token)) is not found.
+- **Truncated tokens.** A prefix is not a token; the pattern requires all
+  43 characters.
+- **Rearranged token bodies.** A reversed body *is* collected as a
+  candidate — the shape is identical — but its fingerprint matches no
+  stored record, so it never reaches the report. It is verification, not
+  pattern-matching, that makes this safe.
+- **Compressed and archived files.** A zip or gzip file is detected as
+  binary and skipped, so a token inside it is not found. The skip is
+  counted in the summary, never silently dropped — but it is a skip.
+- **Files excluded by `.gitignore`,** under `scan --git`. Gitignored
+  content is not listed by git, so it is not scanned there. Scan the path
+  directly to cover it.
+- **Content that no longer exists on this machine.** A leak that was
+  copied elsewhere, pushed to a remote, or already `prune`d away cannot
+  be found here. Note that `prune` deletes expired/revoked records, and a
+  fingerprint is only useful while its record exists: a leaked token past
+  that point reads as clean.
+
+Verification is the safety net that makes the first four acceptable: a
+string brushpass never issued can never be reported, so widening coverage
+cannot produce a false positive.
 
 ## Scope Language
 
