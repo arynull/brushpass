@@ -57,6 +57,12 @@ class TokenStore:
         self.tokens_file = data_dir / "tokens.json"
         self._records: dict[str, TokenRecord] = {}
         self._epoch: int = LEGACY_EPOCH
+        # Ids deleted by the most recent prune(), empty until one runs.
+        # Initialised here because a caller may legitimately read it
+        # before any prune has happened — an audit call site asking "what
+        # did you just delete?" must not have to guard against a
+        # never-pruned store.
+        self.last_pruned: list[str] = []
         self._ensure_storage()
 
     # ---- lifecycle ----------------------------------------------------
@@ -243,8 +249,14 @@ class TokenStore:
 
         Takes the store's epoch from the file, so the answer reflects
         revocations performed by other processes.
+
+        Compares against ``effective_epoch``, not ``epoch``: a token minted
+        before v0.5.0 has no stamp of its own and counts as generation 0.
+        Comparing the raw ``None`` would call every legacy token stale even
+        on an install that has never bumped the counter, which would deny
+        working tokens after a mere version upgrade.
         """
-        return record.epoch != self.epoch
+        return record.effective_epoch != self.epoch
 
     def prune(self, older_than_days: int = 7) -> int:
         """Delete expired+revoked records older than specified days.

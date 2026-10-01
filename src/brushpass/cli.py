@@ -2,15 +2,38 @@
 """Command-line interface for brushpass."""
 
 import argparse
+import hashlib
 import json
 import os
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
 from . import __version__
+from .audit import (
+    DEFAULT_TAIL,
+    EVENT_CREDENTIAL_ADD,
+    EVENT_CREDENTIAL_REMOVE,
+    EVENT_LEAK_FOUND,
+    EVENT_ROTATE_FINISHED,
+    EVENT_ROTATE_STARTED,
+    EVENT_TOKEN_EXPIRE,
+    EVENT_TOKEN_MINT,
+    EVENT_TOKEN_REVOKE,
+    EVENT_VERIFY_DENIED,
+    EVENTS,
+    AuditError,
+    AuditLog,
+    parse_since,
+)
 from .config import Config
-from .credentials import CredentialError, CredentialKeyError, CredentialStore
+from .credentials import (
+    CREDENTIALS_FILE_NAME,
+    CredentialError,
+    CredentialKeyError,
+    CredentialStore,
+)
 from .envout import (
     ENV_FORMATS,
     FORMAT_EXPORT,
@@ -283,7 +306,185 @@ def create_parser() -> argparse.ArgumentParser:
         help="Plaintext token; resolves the record for liveness checks",
     )
 
+    # audit command
+    audit_parser = subparsers.add_parser(
+        "audit", help="Inspect and verify the tamper-evident audit log"
+    )
+    audit_sub = audit_parser.add_subparsers(dest="subcommand", help="Subcommands")
+
+    audit_verify = audit_sub.add_parser(
+        "verify", help="Replay the hash chain from seq 0"
+    )
+    audit_verify.add_argument("--json", action="store_true", help="Output as JSON")
+
+    audit_log = audit_sub.add_parser("log", help="Show recent audit records")
+    audit_log.add_argument(
+        "--event",
+        dest="event",
+        default=None,
+        help=f"Only this event type. One of: {', '.join(EVENTS)}",
+    )
+    audit_log.add_argument(
+        "--since",
+        dest="since",
+        default=None,
+        metavar="DURATION",
+        help="Only records newer than this (e.g. 30m, 24h, 7d)",
+    )
+    audit_log.add_argument(
+        "--tail",
+        dest="tail",
+        type=int,
+        default=DEFAULT_TAIL,
+        metavar="N",
+        help=f"Show at most N records, after filtering (default: {DEFAULT_TAIL})",
+    )
+    audit_log.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # nuke command
+    nuke_parser = subparsers.add_parser(
+        "nuke",
+        help=(
+            "Break-glass: revoke every live token and flag every credential for "
+            "rotation. Requires --yes"
+        ),
+    )
+    nuke_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Actually do it. Without this, prints the plan and exits non-zero",
+    )
+    nuke_parser.add_argument(
+        "--rotate-all",
+        action="store_true",
+        help="Also attempt a real provider rotation for each credential",
+    )
+    nuke_parser.add_argument(
+        "--json", action="store_true", help="Output the plan as JSON"
+    )
+
     return parser
+
+
+def _audit(config: Config) -> AuditLog:
+    """The audit log for this data dir. Cheap; constructs no keys.
+
+    Constructing an :class:`AuditLog` only binds a path — the signing key
+    is generated on the first *write*, and a read-only command that never
+    records never grows one.
+    """
+    return AuditLog(config.data_dir)
+
+
+def _record(audit: AuditLog, event: str, details: dict | None = None) -> None:
+    """Write one audit record. Best effort, never fatal.
+
+    A broken, damaged or unwritable audit log must not abort a mint, a
+    verify or a revoke: the log is where you look *afterwards*, not a gate
+    that decides whether the operation happens. If it cannot be written,
+    say so loudly on stderr and carry on — the tampering surfaces in
+    ``brushpass audit verify``, which is the check.
+
+    Callers pass ids, labels, fingerprints and scopes. Never a token: the
+    plaintext a mint just printed is exactly the string that must not end
+    up on disk a second time.
+    """
+    try:
+        audit.record(event, details or {})
+    except AuditError as e:
+        print(f"WARNING: audit write failed: {e}", file=sys.stderr)
+
+
+def cmd_audit(
+    args: argparse.Namespace,
+    config: Config,
+    store: TokenStore,
+    scanner: Scanner | None,
+) -> int:
+    """audit verify | log."""
+    subcommand = getattr(args, "subcommand", None)
+    if subcommand == "verify":
+        return _audit_verify(args, config)
+    if subcommand == "log":
+        return _audit_log(args, config)
+
+    print(
+        "Error: choose a subcommand: brushpass audit {verify,log}",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def _audit_verify(args, config) -> int:
+    """Replay the chain. Exit 0 only if every record verifies."""
+    try:
+        result = _audit(config).verify()
+    except AuditError as e:
+        print(f"Error: cannot read the audit log: {e}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+    elif result.ok:
+        print(f"OK ({result.records} records)")
+    else:
+        print(f"TAMPERED: record {result.broken_seq}: {result.reason}", file=sys.stderr)
+        print(
+            "Every record from this point on is unreliable. Restore the log "
+            "from a backup, or treat everything after it as unaccounted for",
+            file=sys.stderr,
+        )
+    return 0 if result.ok else 1
+
+
+def _audit_log(args, config) -> int:
+    """Print a tail of the log, filters applied before the limit."""
+    if args.event is not None and args.event not in EVENTS:
+        print(
+            f"Error: unknown event '{args.event}'. Expected one of: "
+            f"{', '.join(EVENTS)}",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        since = parse_since(args.since) if args.since else None
+    except AuditError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    if args.tail < 0:
+        print("Error: --tail cannot be negative", file=sys.stderr)
+        return 1
+
+    try:
+        records = _audit(config).tail(
+            event=args.event, since=since, limit=args.tail
+        )
+    except AuditError as e:
+        print(f"Error: cannot read the audit log: {e}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps([r.to_dict() for r in records], indent=2))
+        return 0
+
+    if not records:
+        print("No records match.")
+        return 0
+
+    for record in records:
+        print(f"{record.seq:<6} {record.ts_utc:<32} {record.event:<28} {record.describe()}")
+
+    # The head hash of the last record shown. Ship it somewhere the
+    # operator who edits this file cannot reach — a collector, a backup —
+    # and a truncated tail stops being invisible. See audit.py's docstring:
+    # nothing local can detect a truncation that leaves the chain
+    # internally consistent.
+    print()
+    print(f"head: {records[-1].record_hash}")
+    print(f"({len(records)} record(s); anchor the head hash out of band)")
+    return 0
 
 
 def _require_scanner(scanner: Scanner | None) -> Scanner:
@@ -342,6 +543,15 @@ def cmd_mint(
 
     # Opportunistic prune on mint
     store.prune()
+    audit = _audit(config)
+    # One record for the whole prune, naming what it deleted rather than
+    # only counting it — an id in the log is what you can go and check.
+    if store.last_pruned:
+        _record(
+            audit,
+            EVENT_TOKEN_EXPIRE,
+            {"token_ids": list(store.last_pruned), "count": len(store.last_pruned)},
+        )
 
     # Generate token
     plaintext = TokenRecord.generate_token()
@@ -360,6 +570,21 @@ def cmd_mint(
 
     # Store the record
     store.add(token_record)
+
+    # The epoch is stamped by store.add, so record what was actually
+    # stamped rather than what the store read a moment ago.
+    _record(
+        audit,
+        EVENT_TOKEN_MINT,
+        {
+            "token_id": token_record.id,
+            "scope": token_record.scope,
+            "label": token_record.label,
+            "credential_label": token_record.credential_label,
+            "expires_at": token_record.expires_at.isoformat(),
+            "epoch": token_record.effective_epoch,
+        },
+    )
 
     # Output
     if args.json:
@@ -400,7 +625,41 @@ def cmd_verify(
     store: TokenStore,
     scanner: Scanner | None,
 ) -> int:
-    """Verify a token."""
+    """Verify a token.
+
+    Verify *successes* are not audited, only denials. That is a deliberate
+    sampling choice: the log is a forensic record of things that were
+    refused, not traffic accounting. A successful verify is the common case
+    and writes nothing an investigator needs; logging it would double the
+    log's size and bury the denials. See the README's Audit section.
+
+    Every denial is audited, including one for a token brushpass has never
+    heard of — an unknown token is exactly what an attacker produces, and
+    a fingerprint is enough to correlate the attempt without ever holding
+    the plaintext.
+    """
+    audit = _audit(config)
+
+    def deny(reason: str, message: str, record=None, **extra) -> int:
+        """Record a refusal, print it, and return the deny exit code.
+
+        ``message`` is what a human sees; ``reason`` is the machine-readable
+        one in ``--json``. They are separate because "Token not found" and
+        "this token was never minted by this machine" are the same event
+        with two audiences.
+        """
+        details = {"reason": reason}
+        if record is not None:
+            details["token_id"] = record.id
+        details.update(extra)
+        _record(audit, EVENT_VERIFY_DENIED, details)
+
+        if args.json:
+            print(json.dumps({"valid": False, **details}))
+        else:
+            print(message, file=sys.stderr)
+        return 1
+
     # Parse required scope
     try:
         required_scope = Scope.parse(args.scope)
@@ -411,47 +670,53 @@ def cmd_verify(
     # Find token
     record = store.find_by_token(args.token)
     if not record:
-        if args.json:
-            print(json.dumps({"valid": False, "reason": "unknown_token"}))
-        else:
-            print("Token not found", file=sys.stderr)
-        return 1
+        # No record, so no id to log. A sha256 of the presented string is
+        # stable across attempts and identifies the token without ever
+        # storing it — the same digest the store itself holds.
+        return deny(
+            "unknown_token",
+            "Token not found",
+            fingerprint=hashlib.sha256(args.token.encode()).hexdigest(),
+        )
 
     now = datetime.now(UTC)
 
     # Check revoked
     if record.revoked:
-        if args.json:
-            print(json.dumps({"valid": False, "reason": "revoked"}))
-        else:
-            print("Token has been revoked", file=sys.stderr)
-        return 1
+        return deny("revoked", "Token has been revoked", record)
+
+    # Check the revocation epoch, before expiry. A token minted before any
+    # generation bump is denied here even though its own `revoked` flag is
+    # still False. That is the propagation guarantee: a cache anywhere that
+    # is holding "this token is fine" is wrong the moment the counter moves,
+    # without anyone having to enumerate ids.
+    if store.is_stale(record):
+        token_epoch, store_epoch = record.effective_epoch, store.epoch
+        return deny(
+            "stale_epoch",
+            f"Token was minted in epoch {token_epoch}, but the store is now at "
+            f"epoch {store_epoch}. It was retired by a revocation that did not "
+            "name it individually",
+            record,
+            token_epoch=token_epoch,
+            store_epoch=store_epoch,
+        )
 
     # Check expiry (fail-closed)
     if record.is_expired(now):
-        if args.json:
-            print(json.dumps({"valid": False, "reason": "expired"}))
-        else:
-            print("Token has expired", file=sys.stderr)
-        return 1
+        return deny("expired", "Token has expired", record)
 
     # Check scope
     granted_scope = Scope.parse(record.scope)
     if not granted_scope.covers(required_scope):
-        if args.json:
-            print(json.dumps({
-                "valid": False,
-                "reason": "scope_mismatch",
-                "granted_scope": record.scope,
-                "required_scope": str(required_scope),
-            }))
-        else:
-            print(
-                f"Scope mismatch: token has '{record.scope}', "
-                f"required '{required_scope}'",
-                file=sys.stderr,
-            )
-        return 1
+        return deny(
+            "scope_mismatch",
+            f"Scope mismatch: token has '{record.scope}', required "
+            f"'{required_scope}'",
+            record,
+            granted_scope=record.scope,
+            required_scope=str(required_scope),
+        )
 
     # Success
     if args.json:
@@ -538,6 +803,12 @@ def cmd_revoke(
     """Revoke a token."""
     success = store.revoke(args.token_id)
 
+    if success:
+        # store.revoke bumped the epoch, which retired every other token
+        # minted before it as a side effect. The record names this id; the
+        # epoch bump is visible by comparing the mint records.
+        _record(_audit(config), EVENT_TOKEN_REVOKE, {"token_id": args.token_id})
+
     if args.json:
         output = {
             "revoked": success,
@@ -562,6 +833,16 @@ def cmd_prune(
     """Prune expired/revoked tokens."""
     count = store.prune()
 
+    # One record naming what went, not just how many. Skipped on a no-op:
+    # a `token.expire` with an empty list is noise, and an operator reading
+    # the log should be able to assume a record means something happened.
+    if store.last_pruned:
+        _record(
+            _audit(config),
+            EVENT_TOKEN_EXPIRE,
+            {"token_ids": list(store.last_pruned), "count": count},
+        )
+
     if args.json:
         output = {
             "pruned": count,
@@ -574,6 +855,220 @@ def cmd_prune(
             print("No tokens to prune")
 
     return 0
+
+
+def cmd_nuke(
+    args: argparse.Namespace,
+    config: Config,
+    store: TokenStore,
+    scanner: Scanner | None,
+) -> int:
+    """nuke --yes [--rotate-all]: the break-glass."""
+    from .journal import RotationJournal
+    from .nuke import NukeError, plan
+    from .nuke import nuke as run_nuke
+
+    # Nothing is constructed here. Opening a CredentialStore *creates* an
+    # empty credentials.json when none exists, and `nuke` without --yes
+    # promises to change nothing — a promise it would break by merely
+    # looking. `plan` reads the labels off the file itself when given a
+    # path, so the refusal path can name credentials without writing.
+    planned = plan(store, config.data_dir / CREDENTIALS_FILE_NAME)
+
+    if not args.yes:
+        # The refusal path prints the plan and stops. Deliberately before
+        # any header: one plan, once, and no chance of it being misread as
+        # "this already ran".
+        if args.json:
+            print(json.dumps(planned, indent=2))
+        else:
+            _render_nuke_plan(planned, planned_only=True)
+            print()
+
+        print(
+            "Nothing was changed. Re-run with --yes to actually do this.\n"
+            "There is no interactive prompt: a nuke from a cron job has "
+            "nobody to answer one.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Past this point the nuke is running for real, so opening (and if need
+    # be creating) the credential store is correct.
+    credentials = None
+    credential_error: str | None = None
+    try:
+        credentials = CredentialStore(config.data_dir)
+    except CredentialError as e:
+        # A credential store brushpass cannot open is not a reason to skip
+        # the revocation: the tokens in `store` are exactly what a nuke
+        # exists to kill, and killing them needs no credential key. Report
+        # it and continue with the token half rather than leaving live
+        # tokens behind because the credential file is unhappy.
+        credential_error = str(e)
+
+    if credential_error:
+        print(
+            f"WARNING: cannot read the credential store ({credential_error}). "
+            "Proceeding with token revocation only; no credential will be "
+            "flagged for rotation",
+            file=sys.stderr,
+        )
+
+    # A real nuke prints what is about to die *before* it does, so the
+    # record in the operator's scrollback matches the action. With --json
+    # stdout carries the result and the header goes to stderr, leaving the
+    # JSON parseable.
+    if args.json:
+        print(json.dumps(planned, indent=2), file=sys.stderr)
+    _render_nuke_plan(planned, planned_only=False, to_stderr=args.json)
+
+    # Annotated rather than left to inference: the plain nuke path passes
+    # None here, and only the --rotate-all branch builds the callable.
+    rotate: Callable[[str], None] | None = None
+    if args.rotate_all:
+        if credentials is None:
+            # Nothing to rotate, and no store to rotate it from. Not an
+            # error: the tokens are still dead, which is the part that was
+            # urgent.
+            print(
+                "WARNING: --rotate-all requested but there is no readable "
+                "credential store; no credential was rotated",
+                file=sys.stderr,
+            )
+        else:
+            # Imported here, not at module scope: the plain nuke path must
+            # not pull in the rotation engine and its providers in order to
+            # revoke nothing but tokens.
+            from .notify import WebhookNotifier
+            from .rotate import RotationEngine
+
+            engine = RotationEngine(
+                credentials=credentials,
+                tokens=store,
+                journal=RotationJournal(config.data_dir),
+                provider_registry=get_provider,
+                notifier=WebhookNotifier.from_config(config),
+            )
+
+            def rotate(label: str) -> None:
+                engine.rotate(label)
+
+    try:
+        result = run_nuke(
+            tokens=store,
+            credentials=credentials,
+            journal=RotationJournal(config.data_dir),
+            audit=_audit(config),
+            rotate_all=args.rotate_all,
+            stdin=sys.stdin,
+            rotate_label=rotate,
+        )
+    except NukeError as e:
+        # Only the token revocation itself is fatal. A journal or audit
+        # failure degrades to a warning inside nuke(), because tokens
+        # that are already dead stay dead.
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    _render_nuke_result(result, as_json=args.json)
+    return 0 if result.ran else 1
+
+
+def _render_nuke_plan(planned: dict, planned_only: bool, to_stderr: bool = False) -> None:
+    """Print what a nuke will kill. Printed before anything happens.
+
+    Goes to stdout unless the caller is producing JSON, in which case it
+    moves to stderr so the machine-readable output stays parseable. A
+    header split across two streams interleaves unpredictably on a
+    terminal, so the whole plan goes to one stream or the other — never
+    both.
+    """
+    stream = sys.stderr if to_stderr else sys.stdout
+
+    def say(line: str = "") -> None:
+        print(line, file=stream)
+
+    say("=" * 70)
+    say("NUKE PLAN (nothing changed)" if planned_only else "NUKE")
+    say("=" * 70)
+
+    tokens = planned.get("live_tokens") or []
+    if tokens:
+        say(f"Live tokens to revoke ({len(tokens)}): {', '.join(tokens)}")
+    else:
+        say("Live tokens to revoke: none")
+
+    epoch = planned.get("epoch", 0)
+    # The epoch advances only if this nuke actually revokes something —
+    # say so rather than promising a bump that may not happen.
+    if tokens:
+        say(f"Revocation epoch: {epoch} -> {epoch + 1}")
+    else:
+        say(f"Revocation epoch: {epoch} (unchanged: no live tokens to retire)")
+
+    labels = planned.get("credentials") or []
+    if labels:
+        say(f"Credentials to flag for rotation ({len(labels)}): {', '.join(labels)}")
+    else:
+        say("Credentials to flag for rotation: none")
+
+    if not planned_only:
+        say()
+        say("This is not reversible and it is not specific to one credential.")
+        say(
+            "brushpass kills its own tokens; the upstream secrets die only "
+            "when the\nprovider is told. Every credential above needs a "
+            "rotation, not just a token revoke."
+        )
+    say("=" * 70)
+
+
+def _render_nuke_result(result, as_json: bool) -> None:
+    """Render what the break-glass did."""
+    if as_json:
+        print(json.dumps(result.to_dict(), indent=2, default=str))
+        return
+
+    print()
+    print("NUKE COMPLETE")
+    print(f"  Tokens revoked:   {result.token_count}")
+    if result.tokens_revoked:
+        print(f"  Token ids:        {', '.join(result.tokens_revoked)}")
+    print(f"  Epoch:            {result.epoch_before} -> {result.epoch_after}")
+    if result.credentials_flagged:
+        print(
+            f"  Flagged to rotate: {result.credential_count} "
+            f"({', '.join(result.credentials_flagged)})"
+        )
+    else:
+        print("  Flagged to rotate: none")
+
+    if result.rotated:
+        print(f"  Rotated now:      {', '.join(result.rotated)}")
+    if result.manual_skipped:
+        print(
+            f"  Manual skipped:  {', '.join(result.manual_skipped)} "
+            "(stdin was not a terminal; rotate by hand)"
+        )
+    if result.rotation_failures:
+        print("  Rotation failures:")
+        for label, reason in result.rotation_failures.items():
+            print(f"    {label}: {reason}")
+
+    print()
+    print("Every token minted before this call is now behind the current epoch")
+    print("and will be denied, whatever its own revoked flag says.")
+    if result.credentials_flagged:
+        print("Upstream credentials are NOT revoked by this command:")
+        for label in result.credentials_flagged:
+            print(f"  brushpass rotate {label}")
+
+    if result.errors:
+        print()
+        print("ERRORS:")
+        for error in result.errors:
+            print(f"  - {error}")
 
 
 def cmd_handoff(
@@ -770,6 +1265,16 @@ def _cred_add(args, config, credentials, store) -> int:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
+    # Label and provider only. The secret is in `record.secret_id` as a
+    # digest and does not belong in the audit log even hashed — if you
+    # hold the plaintext you can rotate; an audit trail is the wrong place
+    # to keep it.
+    _record(
+        _audit(config),
+        EVENT_CREDENTIAL_ADD,
+        {"label": record.label, "provider": record.provider},
+    )
+
     if args.json:
         print(json.dumps({"added": True, **record.to_dict()}, indent=2, default=str))
     else:
@@ -841,6 +1346,11 @@ def _cred_remove(args, config, credentials, store) -> int:
             return 1
 
     credentials.remove(args.label)
+    _record(
+        _audit(config),
+        EVENT_CREDENTIAL_REMOVE,
+        {"label": args.label, "provider": record.provider},
+    )
     print(f"Deleted credential '{args.label}'")
     if linked:
         print(f"Note: {len(linked)} live token(s) still reference it and were not revoked.")
@@ -996,7 +1506,7 @@ def cmd_rotate(
     scanner: Scanner | None,
 ) -> int:
     """rotate <label> [--dry-run] | rotate --status."""
-    from .journal import RotationJournal
+    from .journal import RotationJournal, new_rotation_id
     from .notify import WebhookNotifier
     from .rotate import RotationEngine
 
@@ -1036,6 +1546,17 @@ def cmd_rotate(
         _render_plan(outcome, args.json)
         return 0
 
+    # A real rotation only. --dry-run and --status are reads; a log that
+    # records rotations that never touched a provider is a log that lies
+    # about what happened to the secrets.
+    audit = _audit(config)
+    rotation_id = new_rotation_id()
+    _record(
+        audit,
+        EVENT_ROTATE_STARTED,
+        {"label": args.label, "rotation_id": rotation_id},
+    )
+
     try:
         outcome = engine.rotate(args.label)
     except PersistFailedError as e:
@@ -1044,6 +1565,25 @@ def cmd_rotate(
     except (RotationError, ConfigError, ProviderError, CredentialError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
+
+    # The engine mints its own rotation_id for its journal entry; this
+    # record carries the one generated here plus the engine's, so a
+    # half-finished rotation can be joined up from either side.
+    _record(
+        audit,
+        EVENT_ROTATE_FINISHED,
+        {
+            "label": outcome.label,
+            "rotation_id": rotation_id,
+            "engine_rotation_id": outcome.rotation_id,
+            "state": outcome.state,
+            "new_secret_id": outcome.new_secret_id,
+            "old_secret_id": outcome.old_secret_id,
+            "revoked_tokens": len(outcome.revoked_tokens),
+            "provider_revoked": outcome.provider_revoked,
+            "duration_seconds": round(outcome.duration_seconds, 3),
+        },
+    )
 
     _render_outcome(outcome, args.json)
     return 0
@@ -1213,6 +1753,23 @@ def cmd_scan(
     if args.fix:
         fix_findings(store, report)
 
+    # One record per finding, at the point the CLI has both the finding and
+    # the decision about it. The `path` is the leak's location, not a
+    # secret; `action` says whether --fix revoked it or it was merely
+    # found. Note a token found in many places produces many records
+    # naming the same id — the number of occurrences is itself the signal.
+    audit = _audit(config)
+    for finding in report.findings:
+        details = {
+            "path": finding.location,
+            "token_id": finding.record.id,
+            "fingerprint": finding.fingerprint_prefix,
+            "source": finding.source,
+            "live": finding.live,
+            "action": "revoked" if finding.record.id in report.revoked else "found",
+        }
+        _record(audit, EVENT_LEAK_FOUND, details)
+
     print(render_json(report) if args.json else render_text(report))
     return exit_code(report, fixed=args.fix)
 
@@ -1255,6 +1812,8 @@ def main() -> int:
         "credential": cmd_credential,
         "provider": cmd_provider,
         "rotate": cmd_rotate,
+        "audit": cmd_audit,
+        "nuke": cmd_nuke,
     }
 
     handler = commands.get(args.command)

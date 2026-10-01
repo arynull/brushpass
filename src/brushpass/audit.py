@@ -70,12 +70,13 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-    Ed25519PrivateKey,
-    Ed25519PublicKey,
-)
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+        Ed25519PrivateKey,
+        Ed25519PublicKey,
+    )
 
 AUDIT_LOG_NAME = "audit.log"
 AUDIT_KEY_NAME = "audit.key"
@@ -246,12 +247,56 @@ def signing_message(record_hash: str) -> bytes:
         raise AuditError(f"record_hash is not valid hex: {record_hash!r}") from exc
 
 
+def _ed25519() -> tuple[type, type]:
+    """Import the Ed25519 primitives on demand, as a pair of classes.
+
+    Returns ``(private_key_cls, public_key_cls)``. ``cryptography`` is
+    required to *sign* and *verify*, but the audit module is imported by
+    the CLI unconditionally, so a top-level import here would make every
+    mint, verify and scan fail on an install that has the scanner key but
+    not the crypto library. It is a declared dependency, so this is a
+    belt-and-braces path, not a way to make it optional: a missing package
+    becomes an ``AuditError`` rather than a ``ModuleNotFoundError``
+    traceback.
+
+    Mirrors the same pattern in ``credentials.py``.
+    """
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+            Ed25519PrivateKey,
+            Ed25519PublicKey,
+        )
+    except ImportError as exc:  # pragma: no cover - dependency is declared
+        raise AuditError(
+            "The audit log needs the 'cryptography' package (pip install "
+            "'cryptography>=42'). Without it, records cannot be signed or "
+            "verified. Other brushpass commands still work"
+        ) from exc
+    return Ed25519PrivateKey, Ed25519PublicKey
+
+
+def _invalid_signature() -> type[BaseException]:
+    """The exception ``Ed25519PublicKey.verify`` raises on a bad signature.
+
+    Returned rather than imported so the exception clause above evaluates
+    to a real class even when the import inside :func:`_ed25519` has not
+    happened yet on this code path.
+    """
+    try:
+        from cryptography.exceptions import InvalidSignature
+    except ImportError:  # pragma: no cover - dependency is declared
+        # Without cryptography, load_verifying_key above has already
+        # failed and returned before reaching a signature check.
+        return AuditError
+    return InvalidSignature
+
+
 # --------------------------------------------------------------------------
 # Signing key
 # --------------------------------------------------------------------------
 
 
-def load_signing_key(data_dir: Path) -> Ed25519PrivateKey:
+def load_signing_key(data_dir: Path) -> "Ed25519PrivateKey":
     """Load the audit signing key, generating it on first audit write.
 
     Raises:
@@ -263,13 +308,14 @@ def load_signing_key(data_dir: Path) -> Ed25519PrivateKey:
             machine's entire audit history, and brushpass will not
             silently re-establish trust.
     """
+    private_key_cls, _ = _ed25519()
     path = data_dir / AUDIT_KEY_NAME
     if not path.exists():
         return _create_signing_key(path)
 
     seed = _read_seed(path)
     try:
-        return Ed25519PrivateKey.from_private_bytes(seed)
+        return private_key_cls.from_private_bytes(seed)
     except ValueError as exc:
         raise AuditKeyError(
             f"Refusing to run: audit key {path} is not a valid Ed25519 seed. "
@@ -279,12 +325,15 @@ def load_signing_key(data_dir: Path) -> Ed25519PrivateKey:
         ) from exc
 
 
-def load_verifying_key(data_dir: Path) -> Ed25519PublicKey:
+def load_verifying_key(data_dir: Path) -> "Ed25519PublicKey":
     """The public half, for ``audit verify``. Never creates the key.
 
     Raises:
         AuditKeyError: if the key is missing or too widely readable.
     """
+    # The on-disk artefact is an Ed25519 *seed*, so verification derives
+    # the public half from it rather than loading a public key directly.
+    private_key_cls, _ = _ed25519()
     path = data_dir / AUDIT_KEY_NAME
     if not path.exists():
         raise AuditKeyError(
@@ -295,7 +344,7 @@ def load_verifying_key(data_dir: Path) -> Ed25519PublicKey:
         )
     seed = _read_seed(path)
     try:
-        return Ed25519PrivateKey.from_private_bytes(seed).public_key()
+        return private_key_cls.from_private_bytes(seed).public_key()
     except ValueError as exc:
         raise AuditKeyError(
             f"Refusing to run: audit key {path} is not a valid Ed25519 seed"
@@ -321,8 +370,9 @@ def _read_seed(path: Path) -> bytes:
     return seed
 
 
-def _create_signing_key(path: Path) -> Ed25519PrivateKey:
+def _create_signing_key(path: Path) -> "Ed25519PrivateKey":
     """Generate a fresh Ed25519 key with 0600 permissions."""
+    private_key_cls, _ = _ed25519()
     parent = path.parent
     try:
         parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -337,7 +387,7 @@ def _create_signing_key(path: Path) -> Ed25519PrivateKey:
     except OSError as exc:
         raise AuditKeyError(f"Cannot create audit key {path}: {exc}") from exc
 
-    key = Ed25519PrivateKey.generate()
+    key = private_key_cls.generate()
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(key.private_bytes_raw())
@@ -643,7 +693,7 @@ class AuditLog:
                 )
             try:
                 key.verify(signature, signing_message(stored))
-            except InvalidSignature:
+            except _invalid_signature():
                 return VerifyResult(
                     ok=False,
                     records=len(lines),
@@ -677,7 +727,9 @@ class AuditLog:
 
         ``limit`` applies *after* filtering, so ``--event mint --limit 5``
         is the last five mints rather than five records of which some are
-        mints.
+        mints. A limit of 0 means "show nothing" — ``records()`` with no
+        limit would otherwise hand back the whole log, which is the
+        opposite of what ``--tail 0`` asks for.
         """
         selected = self.records()
         if event is not None:
@@ -686,7 +738,7 @@ class AuditLog:
             cutoff = datetime.now(UTC) - since
             selected = [r for r in selected if _parsed_ts(r) >= cutoff]
         if limit is not None and limit >= 0:
-            selected = selected[-limit:]
+            selected = selected[-limit:] if limit else []
         return selected
 
 

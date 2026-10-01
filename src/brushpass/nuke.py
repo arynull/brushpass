@@ -40,9 +40,11 @@ about. `nuke` says so in its output rather than letting a clean exit be
 read as "the credential is gone".
 """
 
+import json
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 
 from .journal import (
     STATE_STARTED,
@@ -123,18 +125,67 @@ def plan(tokens: TokenStore, credentials=None) -> dict:
     nuke prints. Reading the store is enough: the token list and the
     epoch are both on disk, so a plan is accurate up to the instant it is
     acted on.
+
+    The credential labels are read straight off ``credentials.json``
+    rather than through :class:`~brushpass.credentials.CredentialStore`.
+    Constructing that store *creates* an empty file when none exists —
+    which would mean the path promising to change nothing had just
+    written to the state directory. A plan that touches the disk is not a
+    plan, so this reads the file and nothing else.
     """
     now = datetime.now(UTC)
     live = [
         record for record in tokens.list_all()
         if not record.revoked and not record.is_expired(now)
     ]
-    labels = [r.label for r in credentials.list_all()] if credentials is not None else []
     return {
         "live_tokens": [r.id for r in live],
         "epoch": tokens.epoch,
-        "credentials": labels,
+        "credentials": _credential_labels(credentials),
     }
+
+
+def _credential_labels(credentials) -> list[str]:
+    """Credential labels, or an empty list if they cannot be read.
+
+    Read straight off ``credentials.json`` rather than through
+    :meth:`CredentialStore.list_all`. Constructing that store *creates* an
+    empty file when none exists, so the path promising to change nothing
+    would have just written to the state directory. Reading the JSON is
+    enough for labels, which is all a plan reports.
+
+    Best effort by design: the token half of a nuke works with no
+    credential store at all, and a plan must not fail for want of one.
+    """
+    if credentials is None:
+        return []
+
+    path = None
+    if isinstance(credentials, (str, Path)):
+        # A path to credentials.json. Lets a caller ask what would die
+        # without constructing a store, which would create the file.
+        path = Path(credentials)
+    else:
+        path = getattr(credentials, "credentials_file", None)
+        if path is None:
+            # Not a CredentialStore (a test double, or a future backend):
+            # ask it directly.
+            try:
+                return [record.label for record in credentials.list_all()]
+            except Exception:  # noqa: BLE001 - a plan must always render
+                return []
+
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, AttributeError):
+        # No file, or unreadable. Either way: no credentials to name, and
+        # emphatically not a reason to fail the plan.
+        return []
+
+    entries = raw.get("credentials") if isinstance(raw, dict) else None
+    if not isinstance(entries, list):
+        return []
+    return [str(entry["label"]) for entry in entries if "label" in entry]
 
 
 def nuke(
