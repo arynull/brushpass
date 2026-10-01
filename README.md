@@ -1,6 +1,6 @@
 # brushpass
 
-A local credential broker for AI agents. Mint short-lived, narrowly-scoped tokens so agents never touch your real, long-lived keys.
+A local credential broker for automated tooling. Mint short-lived, narrowly-scoped tokens so callers never touch your real, long-lived keys.
 
 ## Overview
 
@@ -518,6 +518,450 @@ Verification is the safety net that makes the first four acceptable: a
 string brushpass never issued can never be reported, so widening coverage
 cannot produce a false positive.
 
+## Credential rotation
+
+Minting a token is only half the problem. A long-lived credential that
+hands out those tokens has to be replaced eventually, and replacing it
+means the tokens already outstanding become stale.
+
+brushpass closes that loop: it stores the root credential itself
+(encrypted), rotates it through a provider, and revokes every ephemeral
+token minted from it.
+
+### The atomicity contract
+
+One sentence: **a live secret is never untracked.**
+
+A rotation moves a credential from secret A to secret B. There are two
+ways to get that wrong, and both are handled explicitly.
+
+**Losing B.** The provider issued B, and then storing B failed. If B was
+never written down, B is a live upstream credential that nobody holds and
+nobody can revoke. So persisting B happens *before* anything retires A,
+and it retries three times. If it still cannot be stored, brushpass
+records B's identifier in the rotation journal as an **orphan**, aborts
+loudly, and exits non-zero:
+
+```console
+$ brushpass rotate ci-deploy
+======================================================================
+ROTATION ABORTED - A NEW SECRET COULD NOT BE STORED
+======================================================================
+Could not store the new secret after 3 attempts (CredentialError: Failed to
+save credentials: [Errno 28] No space left on device). The old credential for
+'ci-deploy' is STILL LIVE and unchanged. brushpass aborted before revoking
+anything, so your old secret still works - but the provider may have issued
+a new one (identifier 1e0722bf6b54) that brushpass does not hold. Revoke it at
+the provider, or fix the store and re-run the rotation.
+
+Orphaned secret ID: 1e0722bf6b54
+This identifier is in the rotation journal. It is a digest, so the secret
+itself is not recoverable from it.
+$ echo $?
+2
+```
+
+The linked token is untouched too, which is the point:
+
+```console
+$ brushpass list --json
+{"tokens": [{"id": "a00307c5", "credential_label": "ci-deploy", "revoked": false, ...}]}
+```
+
+**Killing the only working one.** If persisting B failed, A must stay
+live. The engine aborts *before* `provider.revoke` and before any linked
+token is revoked, so A continues to work while you deal with the orphan.
+
+So the order is fixed, and it is the whole design:
+
+| # | Step | If it fails |
+|---|------|-------------|
+| 1 | `provider.rotate` → new secret B | Nothing has changed. Abort; A is untouched. |
+| 2 | **Persist B, retrying 3×** | Abort loudly, record B's id as an orphan, exit 2. **A stays live.** |
+| 3 | `provider.revoke(A)`, then revoke linked tokens | B is already stored and live, so the rotation *succeeded*; a stale A is reported as a warning, not a failure. |
+| 4 | Journal entry + audit log line | The journal is the recovery record; a write failure there degrades to a printed warning. |
+
+Step 2 is the commit point. Note that step 3 failing is deliberately
+*not* fatal: with B stored, the credential works, and a superseded
+secret that outlives its rotation is an operational loose end worth
+reporting rather than a reason to roll back a change that is already good.
+
+Rotations are timed end to end against a 60-second budget, and the
+measured duration is printed and recorded in the journal.
+
+### credential add / list / remove
+
+```bash
+brushpass credential add --provider <name> --label <label> [--from-env VAR] [--set KEY=VALUE ...]
+brushpass credential list [--json]
+brushpass credential remove <label> [--yes]
+brushpass credential status <label> [--json]
+```
+
+The secret is read from **stdin** or from the environment variable named
+by `--from-env` — never from an argument. There is no `--secret` flag,
+and that is deliberate: argv is world-readable in `ps` and is recorded in
+every shell history. `--from-env` is the better option of the two in
+scripts, since an env var does not land in the history.
+
+`credential list` shows labels, providers, timestamps and a short
+SHA-256 identifier for each secret — never secret material. Removing a
+credential asks you to type its label, unless you pass `--yes`.
+
+Secrets are encrypted at rest with Fernet (AES-128-CBC + HMAC-SHA256,
+from `cryptography`). The data key lives in `credentials.key`, mode
+`0600`, and brushpass **refuses to run** if it is readable by group or
+other — the same fail-closed refusal as the scanner key, and likewise
+never auto-repaired.
+
+### Linking tokens to a credential
+
+```bash
+brushpass mint --scope <scope> --credential <label>
+```
+
+The label must already exist; minting against an unknown credential is
+rejected before anything is minted, so a bad label never leaves a live
+token behind. The label is recorded on the token and shown by
+`list --json`.
+
+A rotation of that credential revokes every live token carrying the
+label. **Tokens minted without `--credential` are unaffected** — they are
+untethered by design, and keep working until they expire or you revoke
+them yourself.
+
+### rotate
+
+```bash
+brushpass rotate <label> [--dry-run] [--json]
+brushpass rotate --status [--json]
+```
+
+`--dry-run` prints the full plan — provider, every step, and which
+ephemeral tokens would be revoked — and changes nothing at all.
+
+### A full rotation
+
+Every line below is real output, captured from a scratch state directory.
+
+```console
+$ printf '%s\n' "$SECRET_OLD" | brushpass credential add \
+      --provider manual --label ci-deploy
+Stored credential 'ci-deploy' (provider: manual)
+Secret ID: 406b699fe2be
+Added: 2026-10-01T15:52:26.090842+00:00
+
+Encrypted at rest; the plaintext is never written to disk.
+Link tokens to it with: brushpass mint --credential ci-deploy ...
+
+$ grep -r 'OLD-root-credential-value-000' ~/.brushpass
+(no matches - the secret is encrypted at rest)
+
+$ brushpass mint --scope github:rayanalpha/brushpass:read --ttl 2h \
+      --credential ci-deploy --label 'release agent'
+Token: bp_nkbFoDBYVOs9VEIRJsv8ZkMPQYSjgJBQulmTgx_RxD0
+ID: a3e5b5f2
+Scope: github:rayanalpha/brushpass:read
+Label: release agent
+Credential: ci-deploy
+Expires: 2026-10-01T17:52:26.322427+00:00 (2h)
+
+Rotating credential 'ci-deploy' will revoke this token.
+Store this token securely - it will not be shown again.
+
+$ brushpass rotate ci-deploy --dry-run
+ROTATION PLAN (dry run) for 'ci-deploy'
+Provider: manual
+Current secret ID: 406b699fe2be
+
+Steps that WOULD run:
+  1. Print rotation instructions for the operator
+  2. Open the provider's UI for the credential 'ci-deploy'.
+  3. Create a NEW credential with the same or narrower permissions.
+  4. Copy the new secret.
+  5. Paste it at the prompt below (or pipe it on stdin).
+  6. Revoke the OLD credential in the same UI, once this rotation has finished successfully.
+  7. Read the new secret from stdin (never from argv)
+  8. Store the new secret encrypted, replacing the old one
+  9. Note: Revoking a manual credential happens in the provider's own UI, if at all. brushpass cannot confirm it, so it does not claim to have done it. Revoke the old credential yourself as part of the rotation.
+  10. Revoke 1 live ephemeral token(s) linked to 'ci-deploy': a3e5b5f2 (irreversible)
+  11. Write the rotation journal entry and an audit log line
+
+  Note: this provider cannot revoke the old secret upstream.
+
+No changes were made. Re-run without --dry-run to rotate.
+
+$ # the state directory is byte-for-byte identical before and after
+$ printf '%s\n' "$SECRET_NEW" | brushpass rotate ci-deploy
+  Open the provider's UI for the credential 'ci-deploy'.
+  Create a NEW credential with the same or narrower permissions.
+  Copy the new secret.
+  Paste it at the prompt below (or pipe it on stdin).
+  Revoke the OLD credential in the same UI, once this rotation has finished successfully.
+
+brushpass: action=credential.rotate label=ci-deploy provider=manual state=finished rotation_id=rot_1a0f82ac158_024717 duration_seconds=0.025 old_secret_id=406b699fe2be new_secret_id=28529f772272 orphan_secret_id=- provider_revoked=None revoked_tokens=1 error="Upstream revocation not performed: ..."
+
+ROTATION COMPLETE
+  Credential:      ci-deploy
+  Provider:        manual
+  Old secret ID:   406b699fe2be
+  New secret ID:   28529f772272
+  Duration:        0.025s
+  Revoked tokens:  a3e5b5f2
+  Old secret:      not revocable via this provider
+  Rotation ID:     rot_1a0f82ac158_024717
+
+WARNINGS:
+  - Upstream revocation not performed: Revoking a manual credential happens in the provider's own UI, if at all. brushpass cannot confirm it, so it does not claim to have done it. Revoke the old credential yourself as part of the rotation.
+
+$ grep -c 'NEW-root-credential-value-999' ~/.brushpass/credentials.json
+0
+
+$ brushpass credential list
+LABEL                PROVIDER        ADDED                       ROTATIONS  SECRET ID
+------------------------------------------------------------------------------------------
+ci-deploy            manual          2026-10-01T15:52:26.090842+00:00 1          28529f772272
+
+Secrets are never displayed. Rotate with: brushpass rotate <label>
+
+$ brushpass list
+ID       SCOPE                               LABEL           CREDENTIAL      EXPIRES      STATUS
+----------------------------------------------------------------------------------------------------
+a3e5b5f2 github:rayanalpha/brushpass:read    release agent   ci-deploy       1h59m        revoked
+```
+
+The audit line goes to **stderr**, so stdout stays a clean data channel
+and `rotate --json` output can be parsed directly.
+
+### Rotation status
+
+```bash
+brushpass rotate --status
+brushpass credential status <label>
+```
+
+```console
+$ brushpass credential status ci-deploy
+ROTATION STATUS for ci-deploy
+----------------------------------------------------------------------
+Last rotation:   2026-10-01T15:52:26.712633+00:00
+Duration:        0.025s
+State:           finished
+Provider:        manual
+Old secret ID:   406b699fe2be
+New secret ID:   28529f772272
+Revoked tokens:  1
+Finished:        1 successful rotation(s)
+```
+
+Status also surfaces anything that needs a human: rotations that started
+and never finished, and orphaned secret identifiers from a failed
+persist.
+
+### The rotation journal
+
+Every rotation writes an append-only JSON Lines record to
+`~/.brushpass/journal.jsonl` (mode `0600`, fsync'd). Two entries per
+rotation, `started` and then a terminal one:
+
+```json
+{"rotation_id": "rot_1a0f82ac158_024717", "label": "ci-deploy", "state": "started", "started_at": "2026-10-01T15:52:26.712633+00:00", "old_secret_id": "406b699fe2be"}
+{"rotation_id": "rot_1a0f82ac158_024717", "label": "ci-deploy", "state": "finished", "finished_at": "2026-10-01T15:52:26.737519+00:00", "duration_seconds": 0.025, "new_secret_id": "28529f772272", "revoked_tokens": ["a3e5b5f2"]}
+```
+
+No secret material is ever written there. `old_secret_id` and
+`orphan_secret_id` are truncated SHA-256 digests, which let you confirm
+*which* secret is in play without being able to recover it.
+
+## Providers
+
+A provider is the only part of brushpass that talks to a third-party
+service. It is a small object behind a two-method interface, so adding a
+service means adding one file.
+
+```bash
+brushpass provider list
+brushpass provider show <name>
+```
+
+```console
+$ brushpass provider list
+NAME             REVOKE     REQUIRED CONFIG
+--------------------------------------------------------------------------------
+generic-http     yes        url
+github-app       no         app_id, private_key_path, installation_id
+manual           no         (none)
+
+See one provider's detail: brushpass provider show <name>
+```
+
+### github-app
+
+Mints a fresh GitHub App **installation access token** via
+`POST /app/installations/{id}/access_tokens`, authenticated with a
+short-lived RS256 JWT signed with the App's private key (9-minute
+lifetime, GitHub's 10-minute ceiling).
+
+Config: `app_id`, `private_key_path` (must be absolute and mode `0600`),
+`installation_id`. Optional: `api_url`, `repository`, `expires_in`.
+
+**The old token is not revoked, and cannot be.** GitHub supersedes
+installation tokens implicitly when a new one is issued, and there is no
+API call that deletes an outstanding one. brushpass reports
+`supports_revoke = False` and says so plainly instead of pretending the
+old token died; it remains usable until its own expiry (1 hour by
+default). The practical consequence: rotating the *stored* credential is
+safe, but the linked ephemeral tokens brushpass minted are revoked
+immediately, which is the part that matters.
+
+### generic-http
+
+The escape hatch for internal secret services. POSTs to a configured URL
+and reads the new secret out of the JSON response.
+
+| Config key | Required | Meaning |
+|------------|----------|---------|
+| `url` | yes | Absolute http(s) URL |
+| `method` | no | `POST` (default), `PUT`, `PATCH` |
+| `headers` | no | Header map; `{old_secret}` is substituted |
+| `body` | no | Extra JSON fields; `{old_secret}` is substituted |
+| `old_secret_placement` | no | `body` (default), `header`, `query`, `none` |
+| `old_secret_header` | if placement is `header` | Header name |
+| `old_secret_query` | if placement is `query` | Query parameter name |
+| `new_secret_path` | no | Dot-separated path, default `token` |
+| `revoke_url` | no | If set, `revoke` POSTs here |
+| `timeout` | no | Seconds, 0–60 |
+
+Config is validated strictly, before any network call: a mistyped
+endpoint should fail as a config error, not as a confusing HTTP 401 from
+somewhere further along. `timeout` is capped at 60 seconds so a hung
+endpoint cannot blow the rotation budget.
+
+The validator also rejects a `headers` entry carrying `{old_secret}`
+when `old_secret_placement` is `body` — that is almost always a mistake,
+and it would otherwise put a live secret somewhere you did not choose:
+
+```console
+generic-http: config 'headers'['X-Cur'] interpolates {old_secret} but
+'old_secret_placement' is not 'header'. Set the placement to 'header' or
+remove the placeholder, so a live secret is not sent somewhere you did not choose
+```
+
+`--from-env` is the right way to supply a bearer token here, since it
+keeps the secret out of shell history.
+
+```bash
+brushpass credential add --provider generic-http --label vault-write \
+  --set url=https://secrets.internal/v1/rotate \
+  --set new_secret_path=data.token \
+  --set revoke_url=https://secrets.internal/v1/revoke \
+  --set headers.X-Vault-Token='hvs.example' \
+  --set old_secret_placement=header \
+  --set old_secret_header=X-Current-Token
+```
+
+### manual
+
+For credentials with no rotation API — classic GitHub PATs, IAM access
+keys, a database password on a box you do not control. It prints
+step-by-step instructions, reads the new secret from stdin, and hands it
+to the same engine, so the persist-before-revoke contract, the journal,
+linked-token revocation, and the timing all still apply.
+
+What it does not do is pretend to be automation. There is no API call,
+and `supports_revoke` is `False`: whether the old secret dies is up to
+what you just did in the provider's UI, and brushpass reports it as
+"not revocable via this provider" rather than claiming a revocation that
+did not happen.
+
+### Writing a provider
+
+Subclass `Provider` and register it. That is the whole interface:
+
+```python
+from brushpass.providers import Provider, RotationResult, register
+
+class AcmeProvider(Provider):
+    name = "acme"
+    description = "Rotate an Acme service token"
+    required_config = ("api_url", "account_id")
+    supports_revoke = True
+
+    def check_config(self, config: dict) -> None:
+        # Optional: type/value checks, raising ConfigError.
+        if not str(config["api_url"]).startswith("https://"):
+            from brushpass.providers import ConfigError
+            raise ConfigError("acme: 'api_url' must be https")
+
+    def rotate(self, old_secret: str, config: dict) -> RotationResult:
+        # Do the upstream work; raise ProviderError on refusal.
+        # Never return an empty string, never return the old secret back.
+        status, body = request(
+            f"{config['api_url']}/rotate",
+            method="POST",
+            headers={"Authorization": f"Bearer {old_secret}"},
+            body={"account": config["account_id"]},
+        )
+        if status != 200:
+            raise ProviderError(f"acme: rotate returned HTTP {status}")
+        return RotationResult(new_secret=body["token"], expires_at=body.get("expires_at"))
+
+    def revoke(self, secret: str, config: dict) -> None:
+        # Omit supports_revoke (or set it False) if you cannot do this.
+        status, _ = request(
+            f"{config['api_url']}/revoke",
+            method="POST",
+            headers={"Authorization": f"Bearer {secret}"},
+        )
+        if status not in (200, 204):
+            raise ProviderError(f"acme: revoke returned HTTP {status}")
+
+register(AcmeProvider())
+```
+
+Two rules every provider inherits:
+
+1. **Config is validated before the network is touched.** A typo in a
+   config key must fail as a config error, not as a confusing HTTP 401.
+2. **Secrets never travel through argv or an exception message.** They go
+   in request headers or bodies, and any `ProviderError` is phrased so
+   that interpolating it into a log cannot leak one.
+
+Override `plan(context)` if you want your steps to appear in
+`rotate --dry-run`, and `can_revoke(config)` instead of `supports_revoke`
+when revocation depends on the credential's config (as `generic-http`
+does).
+
+### Webhook notifications
+
+If `notifications.webhook_url` is set, brushpass POSTs a JSON summary
+after each rotation.
+
+```yaml
+notifications:
+  webhook_url: https://hooks.example.com/services/T000/B000/XXXX
+```
+
+The payload is the same structure `rotate --json` prints, plus
+`"event": "credential.rotation"`. It carries identifiers and durations
+only — no secret material.
+
+Delivery is **best effort and can never fail a rotation**. The
+credential change is already committed by the time the webhook is sent,
+so a chat server outage reports itself as a warning on the outcome
+instead of turning a successful rotation into a failure:
+
+```console
+$ brushpass rotate ci-deploy
+...
+Note: webhook notification failed: NotificationError: <urlopen error timed out>
+$ echo $?
+0
+```
+
+The rotation is committed before the webhook is attempted, so a chat
+server outage cannot turn a good rotation into a failed one.
+
 ## Scope Language
 
 Scopes define what a token can access. Format: `<provider>:<resource>:<permission>`
@@ -613,8 +1057,11 @@ All data is stored locally in `~/.brushpass/` (or `$BRUSHPASS_DATA_DIR`):
 
 ```
 ~/.brushpass/
-├── config.yaml      # Configuration
-└── tokens.json      # Token records (hashes only, mode 0600)
+├── config.yaml         # Configuration
+├── tokens.json         # Token records (hashes only, mode 0600)
+├── credentials.json    # Root credentials, Fernet-encrypted (mode 0600)
+├── credentials.key     # Credential data key (mode 0600)
+└── journal.jsonl       # Append-only rotation journal (mode 0600)
 ```
 
 ## License

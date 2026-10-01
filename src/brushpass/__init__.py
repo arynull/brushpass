@@ -1,3 +1,3 @@
-"""brushpass - Local credential broker for AI agents."""
+"""brushpass - Local credential broker for automated tooling."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

@@ -57,6 +57,20 @@ class Config:
         return self._data.get("max_ttl", MAX_TTL)
 
     @property
+    def webhook_url(self) -> str | None:
+        """Rotation webhook URL, or None when unset.
+
+        Read from ``notifications.webhook_url`` so the top level of the
+        config stays about token minting and rotation notifications live
+        under their own heading.
+        """
+        notifications = self._data.get("notifications") or {}
+        if not isinstance(notifications, dict):
+            return None
+        url = notifications.get("webhook_url")
+        return str(url).strip() if url else None
+
+    @property
     def data_dir(self) -> Path:
         """Get the data directory path."""
         return self.config_dir

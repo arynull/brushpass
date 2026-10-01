@@ -10,6 +10,7 @@ prompts/
 
 # --- tests are local-only (standing user rule) ---
 tests/
+smoke.sh
 
 # --- secrets ---
 .telegram.env

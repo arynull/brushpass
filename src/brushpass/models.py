@@ -23,6 +23,11 @@ class TokenRecord:
     # cannot be matched by a scan. See scanner.py for why this is
     # verifiable without storing the plaintext.
     fingerprint: str | None = None
+    # Label of the root credential this token was minted from, set by
+    # `mint --credential <label>`. A rotation of that credential revokes
+    # every live token carrying the label; a token minted without one is
+    # untethered and survives rotations (documented in the README).
+    credential_label: str | None = None
 
     @classmethod
     def create(
@@ -34,6 +39,7 @@ class TokenRecord:
         expires_at: datetime,
         parent_id: str | None = None,
         fingerprint: str | None = None,
+        credential_label: str | None = None,
     ) -> tuple["TokenRecord", str]:
         """Create a new token record. Returns (record, plaintext_token)."""
         token_hash = hashlib.sha256(plaintext_token.encode()).hexdigest()
@@ -49,6 +55,7 @@ class TokenRecord:
             revoked=False,
             parent_id=parent_id,
             fingerprint=fingerprint,
+            credential_label=credential_label,
         ), plaintext_token
 
     @staticmethod
@@ -75,6 +82,7 @@ class TokenRecord:
             "revoked": self.revoked,
             "parent_id": self.parent_id,
             "fingerprint": self.fingerprint,
+            "credential_label": self.credential_label,
         }
 
     @classmethod
@@ -93,4 +101,7 @@ class TokenRecord:
             # rather than being back-filled with a fingerprint brushpass
             # cannot compute (it has no plaintext to hash).
             fingerprint=data.get("fingerprint"),
+            # Absent on tokens minted before v0.4.0, which predate
+            # credential linkage and so belong to no rotation.
+            credential_label=data.get("credential_label"),
         )
