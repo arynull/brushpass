@@ -25,3 +25,4 @@ build/
 .venv/
 .pytest_cache/
 .ruff_cache/
+CHECKLIST.md

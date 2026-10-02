@@ -634,6 +634,22 @@ scripts, since an env var does not land in the history.
 SHA-256 identifier for each secret — never secret material. Removing a
 credential asks you to type its label, unless you pass `--yes`.
 
+Provider config follows the same rule as the secret itself: a
+secret-valued `--set` entry must arrive as `--set KEY=env:VARNAME`,
+resolved from the environment at add time — never as a literal on the
+command line (a literal secret-shaped value triggers a loud stderr
+warning). Secret config values are Fernet-encrypted at rest alongside
+the root secret, and rendered as `<redacted>` in every output
+(`credential list --json`, `credential add --json`).
+
+```bash
+export VAULT_TOKEN=hv-redacted
+printf '%s\n' "$ROOT_SECRET" | brushpass credential add \
+  --provider generic-http --label vault-prod \
+  --set url=https://vault.internal/v1/rotate \
+  --set headers.X-Vault-Token=env:VAULT_TOKEN
+```
+
 Secrets are encrypted at rest with Fernet (AES-128-CBC + HMAC-SHA256,
 from `cryptography`). The data key lives in `credentials.key`, mode
 `0600`, and brushpass **refuses to run** if it is readable by group or
@@ -1405,7 +1421,7 @@ if brushpass scan "$LEAKDIR" > /dev/null 2>&1; then
   echo "FAIL: scan should have exited 2 on a live leak"; exit 1
 fi
 brushpass scan --fix "$LEAKDIR" > /dev/null
-if brushpass verify --scope github:rayanalpha/repo:read "$LEAK_TOKEN" > /dev/null 2>&1; then
+if echo "$LEAK_TOKEN" | brushpass verify --scope github:rayanalpha/repo:read > /dev/null 2>&1; then
   echo "FAIL: fixed leak should have been revoked"; exit 1
 fi
 echo "scan/--fix cycle OK"
