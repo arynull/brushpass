@@ -745,48 +745,63 @@ def cmd_verify(
 
     now = datetime.now(UTC)
 
-    # Check revoked. A consumed token is flagged revoked too (that is
-    # how it denies), so this branch has to name the more precise reason
-    # first: "consumed" tells the caller the token did exactly one
-    # useful thing and is now spent, where "revoked" would suggest
-    # someone killed it while it was still good.
-    if record.revoked:
-        if record.consumed:
-            return deny("consumed", "Token already consumed (single-use)", record)
-        return deny("revoked", "Token has been revoked", record)
+    def refuse_if_dead(rec) -> int | None:
+        """Run every denial check against a record.
 
-    # Check the revocation epoch, before expiry. A token minted before any
-    # generation bump is denied here even though its own `revoked` flag is
-    # still False. That is the propagation guarantee: a cache anywhere that
-    # is holding "this token is fine" is wrong the moment the counter moves,
-    # without anyone having to enumerate ids.
-    if store.is_stale(record):
-        token_epoch, store_epoch = record.effective_epoch, store.epoch
-        return deny(
-            "stale_epoch",
-            f"Token was minted in epoch {token_epoch}, but the store is now at "
-            f"epoch {store_epoch}. It was retired by a revocation that did not "
-            "name it individually",
-            record,
-            token_epoch=token_epoch,
-            store_epoch=store_epoch,
-        )
+        Returns the deny exit code, or None when the record is live.
+        Used twice: once on the first read, and again on a fresh read
+        when a single-use consume loses its race — the token may have
+        died a *different* death in between (operator revoke, nuke,
+        expiry), and the audit trail must name the true one instead
+        of assuming it was consumed.
+        """
+        # Check revoked. A consumed token is flagged revoked too (that is
+        # how it denies), so this branch has to name the more precise reason
+        # first: "consumed" tells the caller the token did exactly one
+        # useful thing and is now spent, where "revoked" would suggest
+        # someone killed it while it was still good.
+        if rec.revoked:
+            if rec.consumed:
+                return deny("consumed", "Token already consumed (single-use)", rec)
+            return deny("revoked", "Token has been revoked", rec)
 
-    # Check expiry (fail-closed)
-    if record.is_expired(now):
-        return deny("expired", "Token has expired", record)
+        # Check the revocation epoch, before expiry. A token minted before any
+        # generation bump is denied here even though its own `revoked` flag is
+        # still False. That is the propagation guarantee: a cache anywhere that
+        # is holding "this token is fine" is wrong the moment the counter moves,
+        # without anyone having to enumerate ids.
+        if store.is_stale(rec):
+            token_epoch, store_epoch = rec.effective_epoch, store.epoch
+            return deny(
+                "stale_epoch",
+                f"Token was minted in epoch {token_epoch}, but the store is now at "
+                f"epoch {store_epoch}. It was retired by a revocation that did not "
+                "name it individually",
+                rec,
+                token_epoch=token_epoch,
+                store_epoch=store_epoch,
+            )
 
-    # Check scope
-    granted_scope = Scope.parse(record.scope)
-    if not granted_scope.covers(required_scope):
-        return deny(
-            "scope_mismatch",
-            f"Scope mismatch: token has '{record.scope}', required "
-            f"'{required_scope}'",
-            record,
-            granted_scope=record.scope,
-            required_scope=str(required_scope),
-        )
+        # Check expiry (fail-closed)
+        if rec.is_expired(now):
+            return deny("expired", "Token has expired", rec)
+
+        # Check scope
+        granted_scope = Scope.parse(rec.scope)
+        if not granted_scope.covers(required_scope):
+            return deny(
+                "scope_mismatch",
+                f"Scope mismatch: token has '{rec.scope}', required "
+                f"'{required_scope}'",
+                rec,
+                granted_scope=rec.scope,
+                required_scope=str(required_scope),
+            )
+        return None
+
+    denial = refuse_if_dead(record)
+    if denial is not None:
+        return denial
 
     # Spend the token, for a single-use one, before reporting success.
     #
@@ -808,9 +823,24 @@ def cmd_verify(
             print(f"Error: could not consume single-use token: {e}", file=sys.stderr)
             return 1
         if not consumed:
-            # Someone else got there first: the token was spent between
-            # the checks above and the write. Exactly one verifier wins.
-            return deny("consumed", "Token already consumed (single-use)", record)
+            # Someone else got there first: the token died between the
+            # checks above and the write. Re-read it and name the true
+            # death — an operator revoke (or nuke, or expiry) racing this
+            # verify must not be mislabelled "consumed", or the audit
+            # trail answers the wrong forensic question.
+            fresh = store.find_by_id(record.id)
+            if fresh is None:
+                # Practically impossible (prune only deletes long-dead
+                # records), but fail closed on the vague side rather than
+                # crash.
+                return deny("consumed", "Token already consumed (single-use)", record)
+            recheck = refuse_if_dead(fresh)
+            if recheck is not None:
+                return recheck
+            # A live record here would mean consume() lied; it cannot
+            # happen (revoked never un-revokes, the epoch never goes
+            # down, expiry never un-expires), so report the spend.
+            return deny("consumed", "Token already consumed (single-use)", fresh)
         # A consumption is audited even though verify successes are not
         # (see the module docstring): this is the moment a capability
         # stops existing. Ids, scope and label — never the plaintext.
