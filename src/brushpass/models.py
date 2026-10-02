@@ -20,12 +20,25 @@ TOKEN_MATERIAL_PATTERN = re.compile(r"bp_[A-Za-z0-9_-]{20,}")
 
 
 def validate_label(label: str | None, what: str = "label") -> None:
-    """Reject control characters and token-shaped content in a label.
+    """Reject control/format characters and token-shaped content in a label.
 
     Labels are rendered verbatim in ``list`` and ``audit log`` tables. A
     newline or ANSI escape smuggled into a label can spoof table rows
     (fake a status line) or hide output with cursor movements, so labels
-    are plain text: no control characters, full stop.
+    are plain text.
+
+    Rejected, by Unicode general category:
+    - Cc (control) and DEL: newlines, escapes, tabs.
+    - Cf (format): U+202E RIGHT-TO-LEFT OVERRIDE reverses the trailing
+      columns in a bidi-aware terminal, so a *revoked* token's STATUS
+      column can visually read "active"; U+200B ZERO WIDTH SPACE makes
+      distinct labels look identical.
+    - Zl/Zp (line/paragraph separators): U+2028/U+2029 break rows.
+    - Cs (surrogates): malformed by definition.
+
+    Zs (spaces, including no-break) stays allowed: "backup job" is a
+    legitimate label. Co (private use) stays allowed: visible glyphs,
+    not a spoofing vector.
 
     A label shaped like a token (``bp_`` + 20 or more base64 chars) is
     rejected too: it is either a pasted token — which must never be stored
@@ -35,10 +48,15 @@ def validate_label(label: str | None, what: str = "label") -> None:
     """
     if label is None:
         return
-    if any(unicodedata.category(ch) == "Cc" or ord(ch) == 0x7F for ch in label):
+    if any(
+        unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp", "Cs")
+        or ord(ch) == 0x7F
+        for ch in label
+    ):
         raise LabelError(
-            f"Invalid {what}: control characters (newlines, escape codes, "
-            "tabs) are not allowed in labels"
+            f"Invalid {what}: control and format characters (newlines, "
+            "escape codes, tabs, bidi overrides, zero-width or line "
+            "separators) are not allowed in labels"
         )
     if TOKEN_MATERIAL_PATTERN.search(label):
         raise LabelError(
