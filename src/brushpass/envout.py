@@ -13,9 +13,9 @@ caller's environment and can outlive the shell — so:
 Note on ``--id``: brushpass stores token *hashes* only, so a token
 identified by ID cannot be re-emitted by a later process — the plaintext
 no longer exists anywhere. That is the storage guarantee working as
-intended, not a bug. ``env`` therefore takes the plaintext token
-positionally (exactly as ``verify`` does) and uses the record behind it
-for the fail-closed liveness checks.
+intended, not a bug. ``env`` therefore reads the token from stdin or
+``--from-env`` (never argv — trust boundary 2) and uses the record
+behind it for the fail-closed liveness checks.
 """
 
 import json

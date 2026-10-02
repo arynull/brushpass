@@ -34,6 +34,8 @@ from .credentials import (
     CredentialError,
     CredentialKeyError,
     CredentialStore,
+    is_secret_config_key,
+    is_secret_config_value,
 )
 from .envout import (
     ENV_FORMATS,
@@ -252,7 +254,12 @@ def create_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="KEY=VALUE",
-        help="Provider config entry (repeatable)",
+        help=(
+            "Provider config entry (repeatable). A value of the form "
+            "env:VARNAME is resolved from the environment — use this for "
+            "secret values, never a literal secret on the command line "
+            "(argv is world-readable)"
+        ),
     )
     cred_add.add_argument("--json", action="store_true", help="Output as JSON")
 
@@ -1257,7 +1264,11 @@ def _read_secret(args) -> str:
             return getpass("Secret: ")
         except (EOFError, KeyboardInterrupt):
             raise CredentialError("No secret supplied") from None
-    return sys.stdin.readline()
+
+    # Piped stdin. readline (not read) so a trailing newline from
+    # `printf '%s\n' "$SECRET" | brushpass credential add` is stripped,
+    # not part of the secret — exactly like _read_token.
+    return sys.stdin.readline().strip()
 
 
 class TokenInputError(Exception):
@@ -1339,10 +1350,44 @@ def _parse_typed_config(pairs) -> dict:
     ``123456``, not the string, because providers type-check their config.
     A value that is not valid JSON is kept as a string, so a secret or a
     URL survives untouched.
+
+    A value of the form ``env:VARNAME`` is resolved from the environment
+    *before* coercion and is always kept as a string: this is the non-argv
+    path for secret config values (trust boundary 2 — argv is
+    world-readable). A missing or empty variable is a hard error; the
+    literal ``env:...`` text is never stored.
     """
     raw = _parse_config(pairs)
     config: dict = {}
+    warned = False
     for key, value in raw.items():
+        if isinstance(value, str) and value.startswith("env:"):
+            var_name = value[4:]
+            env_value = os.environ.get(var_name)
+            if not env_value:
+                raise CredentialError(
+                    f"--set {key}=env:{var_name}: environment variable "
+                    f"'{var_name}' is not set or is empty. Export it first, "
+                    "e.g. `export VARNAME=...`; the literal 'env:...' is "
+                    "never stored"
+                )
+            config[key] = env_value
+            continue
+        if not warned and (
+            is_secret_config_key(key) or is_secret_config_value(value)
+        ):
+            # Same class as the argv token ban (trust boundary 2): a live
+            # secret on the command line is world-readable in ps and
+            # shell history. This checks the *literal* argv value, so a
+            # properly-sourced env:VARNAME never triggers it. Warn once.
+            print(
+                "WARNING: --set "
+                f"'{key}' looks like a secret but was given literally on "
+                "the command line; it is visible in ps and shell history. "
+                f"Use --set '{key}=env:VARNAME' instead",
+                file=sys.stderr,
+            )
+            warned = True
         try:
             config[key] = json.loads(value)
         except (json.JSONDecodeError, TypeError):
@@ -1414,7 +1459,13 @@ def _cred_add(args, config, credentials, store) -> int:
     )
 
     if args.json:
-        print(json.dumps({"added": True, **record.to_dict()}, indent=2, default=str))
+        print(
+            json.dumps(
+                {"added": True, **credentials.render_record(record.label)},
+                indent=2,
+                default=str,
+            )
+        )
     else:
         print(f"Stored credential '{record.label}' (provider: {record.provider})")
         print(f"Secret ID: {record.secret_id}")
@@ -1432,7 +1483,11 @@ def _cred_list(args, config, credentials, store) -> int:
     if args.json:
         print(
             json.dumps(
-                {"credentials": [r.to_dict() for r in records]},
+                {
+                    "credentials": [
+                        credentials.render_record(r.label) for r in records
+                    ]
+                },
                 indent=2,
                 default=str,
             )

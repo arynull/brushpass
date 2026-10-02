@@ -26,7 +26,19 @@ Threat model, stated plainly:
 
 Secret ingestion never touches argv: ``credential add`` reads the secret
 from stdin or from a named environment variable, because argv is world
-readable in ``ps`` and in shell history.
+readable in ``ps`` and in shell history. The same rule covers *provider
+config*: a secret-shaped ``--set`` value must arrive as ``env:VARNAME``,
+which is resolved from the environment at add time and stored encrypted —
+never as a literal on the command line.
+
+Config follows the same three faces:
+
+* it enters non-argv (``env:`` interpolation), so no live secret is ever
+  world-readable in ``/proc/<pid>/cmdline`` or in shell history;
+* it is redacted out of every rendered record, so no output carries
+  secret material; and
+* it is Fernet-encrypted at rest alongside the root secret, so
+  ``credentials.json`` holds no plaintext provider credential.
 """
 
 import hashlib
@@ -35,7 +47,7 @@ import json
 import os
 import re
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -72,6 +84,160 @@ CREDENTIALS_FILE_MODE = 0o600
 LABEL_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 MAX_SECRET_BYTES = 64 * 1024
+
+# The marker every redaction path uses: audit records, scan-report
+# locations and rendered credential config all say exactly this, so one
+# redacted string means one thing across the whole tool.
+REDACTED = "<redacted>"
+
+# Config keys whose *value* is a secret. Matched case-insensitively
+# against each segment of a key, so a dot-path like
+# ``headers.X-Vault-Token`` and a nested ``{"client_secret": ...}`` are
+# both caught. Deliberately a name list rather than a value test: a URL
+# and an org name are non-secrets that happen to be stored in config,
+# while a key called ``token`` is a secret whatever it holds.
+SECRET_CONFIG_KEY_PARTS = frozenset(
+    {
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "pwd",
+        "bearer",
+        "authorization",
+        "api_key",
+        "apikey",
+        "private_key",
+        "privatekey",
+        "client_secret",
+    }
+)
+
+# Config keys whose value is *not* a secret even though they are named
+# like one. Without this, ``old_secret_header`` (a header *name*, checked
+# by the generic-http provider) and ``new_secret_path`` (a JSON pointer)
+# would be encrypted and redacted as though they carried live material,
+# which hides the provider config an operator needs to debug a rotation.
+SECRET_CONFIG_KEY_EXEMPT = frozenset(
+    {
+        "old_secret_header",
+        "old_secret_query",
+        "new_secret_path",
+        "old_secret_placement",
+    }
+)
+
+# A config key segment is compared after stripping separators, so
+# ``X-Vault-Token``, ``x_vault_token`` and ``vault-token`` all reduce to
+# the same word.
+_KEY_SPLIT = re.compile(r"[.\-_/]+")
+
+
+def _key_segments(key: str) -> list[str]:
+    """Split a (possibly dotted) config key into lower-cased segments."""
+    return [segment for segment in _KEY_SPLIT.split(key.lower()) if segment]
+
+
+def is_secret_config_key(key: str) -> bool:
+    """True if a config key names a secret value.
+
+    An exempt key (``old_secret_header`` and friends) is checked first,
+    so a config that names the *location* of a secret stays readable; a
+    path whose other segments are secret-ish is still secret-ish, since
+    the exemption is for the whole key and not for its parts.
+
+    The whole key is checked as well as its segments: ``api_key`` must
+    match even though splitting on separators would break it into
+    ``api`` + ``key``, neither of which is secret-ish on its own.
+    """
+    lowered = key.lower()
+    if lowered in SECRET_CONFIG_KEY_EXEMPT:
+        return False
+    if lowered in SECRET_CONFIG_KEY_PARTS:
+        return True
+    return any(segment in SECRET_CONFIG_KEY_PARTS for segment in _key_segments(key))
+
+
+def is_secret_config_value(value: object) -> bool:
+    """True if a config *value* is shaped like secret material.
+
+    The same pattern the audit writer and the scan report redact with
+    (``TOKEN_MATERIAL_PATTERN``), so one definition of "this looks like
+    a token" governs redaction on every path.
+    """
+    return isinstance(value, str) and bool(TOKEN_MATERIAL_PATTERN.search(value))
+
+
+def split_config(config: dict) -> tuple[dict, dict]:
+    """Split a config mapping into (plaintext, secret) halves.
+
+    A value is secret when its key names a secret or its value is
+    token-shaped. Nested mappings are walked so ``headers`` keeps its
+    shape on both sides: ``{"headers": {"X-Vault-Token": ...}}``
+    becomes ``{"headers": {}}`` plus ``{"headers": {"X-Vault-Token": ...}}``.
+
+    Raises:
+        CredentialError: if config is not a mapping.
+    """
+    if not isinstance(config, dict):
+        raise CredentialError(
+            f"Credential config must be a mapping, got {type(config).__name__}"
+        )
+    plain: dict = {}
+    secret: dict = {}
+    for key, value in config.items():
+        name = str(key)
+        if isinstance(value, dict):
+            nested_plain, nested_secret = split_config(value)
+            if is_secret_config_key(name):
+                # The whole subtree is secret: keep it intact on the
+                # secret side so it merges back exactly as supplied.
+                secret[name] = value
+                plain[name] = {}
+            else:
+                plain[name] = nested_plain
+                if nested_secret:
+                    secret[name] = nested_secret
+            continue
+        if is_secret_config_key(name) or is_secret_config_value(value):
+            secret[name] = value
+        else:
+            plain[name] = value
+    return plain, secret
+
+
+def merge_config(plain: dict, secret: dict) -> dict:
+    """Recombine the two halves of a split config into one mapping."""
+    merged = dict(plain or {})
+    for key, value in (secret or {}).items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = merge_config(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def redact_config(config: dict) -> dict:
+    """Replace every secret config value with ``<redacted>``.
+
+    Key shape decides first, then value shape, exactly as
+    :func:`split_config` decides what gets encrypted — so a value that
+    would be stored encrypted is never rendered. Non-secret config
+    (URLs, paths, placement names) stays visible, because a listing
+    that hides everything is useless for debugging a rotation.
+    """
+    if not isinstance(config, dict):
+        return config
+    out: dict = {}
+    for key, value in config.items():
+        name = str(key)
+        if isinstance(value, dict):
+            out[key] = redact_config(value)
+        elif is_secret_config_key(name) or is_secret_config_value(value):
+            out[key] = REDACTED
+        else:
+            out[key] = value
+    return out
 
 
 class CredentialError(Exception):
@@ -166,6 +332,28 @@ class CredentialRecord:
     config: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
+        """Render for output. Secret config values are redacted.
+
+        Every renderer reaches a record through this method — ``credential
+        list --json``, ``credential add --json``, anything that prints a
+        credential — so redacting here is what keeps secret material out of
+        brushpass output. Storage does *not* use this method; it uses
+        :meth:`_to_storage_dict`, which writes the plaintext config half
+        only. Never call this to persist a record.
+        """
+        return self._as_dict(redact=True)
+
+    def _to_storage_dict(self) -> dict:
+        """Serialize for on-disk storage.
+
+        Does not redact: ``config`` here is the *public* half of the split
+        (see :func:`split_config`), so every value in it is already
+        non-secret by construction. The secret half is encrypted
+        separately and written alongside by :meth:`CredentialStore._save`.
+        """
+        return self._as_dict(redact=False)
+
+    def _as_dict(self, redact: bool) -> dict:
         return {
             "label": self.label,
             "provider": self.provider,
@@ -174,8 +362,9 @@ class CredentialRecord:
             "secret_digest": self.secret_digest,
             "rotated_at": self.rotated_at.isoformat() if self.rotated_at else None,
             "rotation_count": self.rotation_count,
-            "config": self.config,
+            "config": redact_config(self.config) if redact else self.config,
         }
+
 
     @classmethod
     def from_dict(cls, data: dict) -> "CredentialRecord":
@@ -287,6 +476,10 @@ class CredentialStore:
         self._records: dict[str, CredentialRecord] = {}
         self._secrets: dict[str, str] = {}
         self._ciphertexts: dict[str, str] = {}
+        # Decrypted secret halves of provider config, keyed by label.
+        # Mirrors _secrets: plaintext lives here in memory only; _save
+        # encrypts each half into the entry's "secret_config" field.
+        self._secret_configs: dict[str, dict] = {}
         self._ensure_storage()
 
     # ---- lifecycle ----------------------------------------------------
@@ -324,16 +517,66 @@ class CredentialStore:
                 "expected a JSON object with a 'credentials' list"
             ) from exc
 
+        secret_configs: dict[str, dict] = {}
+        needs_migration = False
         for entry in entries:
             record = CredentialRecord.from_dict(entry)
             ciphertext = entry.get("ciphertext", "")
             records[record.label] = record
             ciphertexts[record.label] = ciphertext
             secrets[record.label] = self._decrypt(ciphertext, key, record.label)
+            secret_half = self._decrypt_secret_config(
+                entry.get("secret_config", ""), key, record.label
+            )
+            # v1 migration: the plaintext "config" of an old entry may
+            # still hold secret entries. Pull them into the encrypted
+            # half; v2 entries already store only the public half, so
+            # split_config finds nothing and this is a no-op for them.
+            plain_half, found_secret = split_config(record.config)
+            if found_secret:
+                secret_half = merge_config(secret_half, found_secret)
+                records[record.label] = replace(record, config=plain_half)
+                needs_migration = True
+            secret_configs[record.label] = secret_half
 
         self._records = records
         self._secrets = secrets
         self._ciphertexts = ciphertexts
+        self._secret_configs = secret_configs
+        if needs_migration:
+            # The secrets are encrypted in memory above; write them back
+            # now so the plaintext leaves the disk on this load. If the
+            # write fails we raise rather than continue with secrets we
+            # could not persist.
+            self._save()
+
+    def _decrypt_secret_config(
+        self, raw_ciphertext: str, key: bytes, label: str
+    ) -> dict:
+        """Decrypt a credential entry's secret config half.
+
+        Empty (or missing) means the entry has no secret config.
+        Decryption failure is fail-closed — same as a bad root-secret
+        ciphertext, brushpass will not run with config it cannot read.
+        """
+        if not raw_ciphertext:
+            return {}
+        try:
+            decoded = self._decrypt(raw_ciphertext, key, label)
+            parsed = json.loads(decoded)
+        except (CredentialError, json.JSONDecodeError) as exc:
+            raise CredentialError(
+                f"Cannot decrypt config for credential '{label}'. The "
+                "ciphertext does not match the data key, so either the "
+                "key was rotated away or the store was tampered with. "
+                "brushpass will not continue with config it cannot read"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise CredentialError(
+                f"Credential store {self.credentials_file} is malformed: "
+                f"secret config for '{label}' is not a mapping"
+            )
+        return parsed
 
     def _save(self) -> None:
         """Write the store atomically: unique temp file, then replace.
@@ -345,9 +588,13 @@ class CredentialStore:
         mint used to hit. mkstemp creates the file mode 0600 already.
         """
         data = {
-            "version": 1,
+            "version": 2,
             "credentials": [
-                {**record.to_dict(), "ciphertext": self._ciphertexts.get(record.label, "")}
+                {
+                    **record._to_storage_dict(),
+                    "ciphertext": self._ciphertexts.get(record.label, ""),
+                    "secret_config": self._encrypt_secret_config(record.label),
+                }
                 for record in self._records.values()
             ],
         }
@@ -411,26 +658,69 @@ class CredentialStore:
                 f"'brushpass credential remove {label}'"
             )
 
+        # Split provider config: the public half lives on the record in
+        # plaintext, the secret half is encrypted at rest. Split before
+        # encrypting anything, so a bad config never leaves a ciphertext
+        # behind.
+        plain_config, secret_half = split_config(dict(config or {}))
         record = CredentialRecord(
             label=label,
             provider=provider,
             added_at=now or datetime.now(UTC),
             secret_id=secret_digest(secret)[:12],
             secret_digest=secret_digest(secret),
-            config=dict(config or {}),
+            config=plain_config,
         )
         # Encrypt first: an encryption failure must not leave a metadata
         # entry in memory that has no secret behind it.
         ciphertext = self._encrypt(secret, label)
         self._ciphertexts[label] = ciphertext
         self._secrets[label] = secret
+        self._secret_configs[label] = secret_half
         try:
             self._commit(record)
         except CredentialError:
             self._ciphertexts.pop(label, None)
             self._secrets.pop(label, None)
+            self._secret_configs.pop(label, None)
             raise
         return record
+
+    def _encrypt_secret_config(self, label: str) -> str:
+        """Encrypt a label's secret config half for storage.
+
+        Returns "" when the label has no secret config, keeping the file
+        readable. Encryption failure raises CredentialError — _save must
+        never write a store it cannot fully protect.
+        """
+        secret_half = self._secret_configs.get(label) or {}
+        if not secret_half:
+            return ""
+        return self._encrypt(json.dumps(secret_half, sort_keys=True), label)
+
+    def get_config(self, label: str) -> dict:
+        """Return the full provider config for a label.
+
+        The public half from the record merged with the decrypted secret
+        half. This is the only path providers should read config through;
+        ``record.config`` alone is the public half and must never be
+        treated as complete.
+        """
+        record = self.get(label)
+        return merge_config(record.config, self._secret_configs.get(label) or {})
+
+    def render_record(self, label: str) -> dict:
+        """Display rendering of a credential for CLI output.
+
+        Unlike ``record.to_dict()`` — which only sees the public half —
+        this shows every configured key with secret values replaced by
+        ``<redacted>``, so an operator debugging a rotation can see
+        *what* is configured without ever seeing live material.
+        """
+        record = self.get(label)
+        rendered = record.to_dict()
+        rendered["config"] = redact_config(self.get_config(label))
+        return rendered
 
     def get(self, label: str) -> CredentialRecord:
         """Return a record's metadata (never its plaintext).
@@ -477,6 +767,7 @@ class CredentialStore:
         del self._records[label]
         self._secrets.pop(label, None)
         self._ciphertexts.pop(label, None)
+        self._secret_configs.pop(label, None)
         self._save()
         return record
 
@@ -526,19 +817,27 @@ class CredentialStore:
         return updated
 
     def set_config(self, label: str, config: dict) -> CredentialRecord:
-        """Attach provider configuration to an existing credential."""
+        """Attach provider configuration to an existing credential.
+
+        The config is split like in :meth:`add`: secret entries are
+        encrypted at rest, the public half stays on the record.
+        """
         record = self.get(label)
-        updated = CredentialRecord(
-            label=record.label,
-            provider=record.provider,
-            added_at=record.added_at,
-            secret_id=record.secret_id,
-            secret_digest=record.secret_digest,
-            rotated_at=record.rotated_at,
-            rotation_count=record.rotation_count,
-            config=dict(config or {}),
+        plain_config, secret_half = split_config(dict(config or {}))
+        previous_secret_config = self._secret_configs.get(label)
+        self._secret_configs[label] = secret_half
+        updated = replace(
+            record,
+            config=plain_config,
         )
-        self._commit(updated)
+        try:
+            self._commit(updated)
+        except CredentialError:
+            if previous_secret_config is None:
+                self._secret_configs.pop(label, None)
+            else:
+                self._secret_configs[label] = previous_secret_config
+            raise
         return updated
 
     def has(self, label: str) -> bool:
@@ -561,6 +860,7 @@ class CredentialStore:
             )
         previous_record = self._records.get(record.label)
         previous_secret = self._secrets.get(record.label)
+        previous_secret_config = self._secret_configs.get(record.label)
 
         self._records[record.label] = record
         try:
@@ -575,4 +875,8 @@ class CredentialStore:
                 self._secrets.pop(record.label, None)
             else:
                 self._secrets[record.label] = previous_secret
+            if previous_secret_config is None:
+                self._secret_configs.pop(record.label, None)
+            else:
+                self._secret_configs[record.label] = previous_secret_config
             raise

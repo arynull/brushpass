@@ -190,7 +190,9 @@ class RotationEngine:
         # Config is validated during planning: `rotate --dry-run` is the
         # cheapest place to discover a broken config, and discovering it
         # before any secret moves is the entire point of a dry run.
-        values = provider.validate_config(record.config)
+        values = provider.validate_config(
+            self.credentials.get_config(label)
+        )
 
         context = RotationContext(
             label=label, provider=record.provider, config=values, record=record
@@ -291,7 +293,9 @@ class RotationEngine:
         started_at = now_iso()
         record = self.credentials.get(label)
         provider = self._provider_registry(record.provider)
-        values = provider.validate_config(record.config)
+        values = provider.validate_config(
+            self.credentials.get_config(label)
+        )
         rotation_id = new_rotation_id()
         old_secret = self.credentials.get_secret(label)
         old_id = secret_digest(old_secret)[:12]
