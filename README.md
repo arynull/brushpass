@@ -823,6 +823,13 @@ way around it: an existing-but-empty log file verifies TAMPERED, and a
 deleted log file verifies TAMPERED while the signing key survives —
 only a never-used state dir honestly reports "0 records".
 
+Three outcomes, three meanings: `OK` (chain intact), `TAMPERED` (a
+record was edited, deleted or reordered — the exact first-broken seq is
+named), and a plain `Error` (the log was **not checked**: the signing
+key is missing, unreadable, or group/world-readable). A key the command
+cannot trust is an operational problem, never a tamper claim — and
+restoring a backup cannot fix a file mode.
+
 ```console
 $ brushpass audit verify
 OK (128 records)
@@ -1262,10 +1269,11 @@ When verifying, the issued scope must cover the required scope:
 
 ## TTL (Time-to-Live)
 
-Supported formats: `30s`, `15m`, `2h`, `7d`, `1w`
+Supported units: `s`, `m`, `h`, `d`, `w` — e.g. `30s`, `15m`, `2h`.
 
 - Default: 2 hours
-- Maximum: 24 hours
+- Maximum: 24 hours (`7d` and `1w` parse but always exceed the maximum
+  and are rejected)
 
 Tokens cannot outlive their TTL. Expired tokens are always denied (fail-closed).
 

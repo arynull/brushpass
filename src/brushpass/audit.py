@@ -199,12 +199,19 @@ class VerifyResult:
     records: int
     broken_seq: int | None = None
     reason: str | None = None
+    # True when verification could not run at all — the signing key is
+    # missing, unreadable, or has unsafe permissions. The log was NOT
+    # checked, so this is not a tamper claim: "TAMPERED" would name a
+    # broken sequence that was never examined, and backup advice would
+    # send the operator chasing the wrong problem.
+    error: bool = False
 
     def to_dict(self) -> dict:
         return {
             "ok": self.ok,
             "records": self.records,
             "broken_seq": self.broken_seq,
+            "error": self.error,
             "reason": self.reason,
         }
 
@@ -323,6 +330,25 @@ def load_signing_key(data_dir: Path) -> "Ed25519PrivateKey":
             "that a new key cannot verify records signed by the old one, so "
             "the existing audit log will read as unverifiable until it is gone"
         ) from exc
+
+
+def check_key_permissions(data_dir: Path) -> None:
+    """Refuse when the audit key exists but is group/world-readable.
+
+    Read-only commands such as ``audit log`` never load the key, but the
+    audit subsystem's trust root is that key: presenting log output as
+    normal while the signing key may be disclosed would be a lie by
+    omission. A missing key is fine — a fresh state dir has no log yet.
+    """
+    path = data_dir / AUDIT_KEY_NAME
+    if path.exists():
+        mode = path.stat().st_mode & 0o777
+        if mode & 0o077:
+            raise AuditKeyError(
+                f"Refusing to run: audit key {path} has mode {mode:04o}, "
+                f"which is readable by group or others. Fix it with: "
+                f"chmod 0600 {path}"
+            )
 
 
 def load_verifying_key(data_dir: Path) -> "Ed25519PublicKey":
@@ -671,8 +697,11 @@ class AuditLog:
         try:
             key = load_verifying_key(self.data_dir)
         except AuditKeyError as exc:
+            # The log was not checked — a key this command cannot trust is
+            # an operational error, not a broken chain. Reporting it as
+            # TAMPERED would name a sequence that was never examined.
             return VerifyResult(
-                ok=False, records=len(lines), broken_seq=None, reason=str(exc)
+                ok=False, records=len(lines), reason=str(exc), error=True
             )
 
         previous = GENESIS_HASH

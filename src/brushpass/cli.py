@@ -25,9 +25,10 @@ from .audit import (
     EVENTS,
     AuditError,
     AuditLog,
+    check_key_permissions,
     parse_since,
 )
-from .config import Config
+from .config import Config, resolve_data_dir
 from .credentials import (
     CREDENTIALS_FILE_NAME,
     CredentialError,
@@ -72,7 +73,7 @@ from .scan import (
 from .scanner import Scanner, ScannerKeyError, load_scanner
 from .scope import Scope, ScopeError
 from .sources import ScanSourceError
-from .store import TokenStore
+from .store import StorageError, TokenStore
 from .ttl import TTLError, format_expiry, parse_ttl
 
 # Commands that mint or match token material, and therefore need the
@@ -427,6 +428,12 @@ def _audit_verify(args, config) -> int:
         print(json.dumps(result.to_dict(), indent=2))
     elif result.ok:
         print(f"OK ({result.records} records)")
+    elif result.error:
+        # The chain was not checked — a key this command cannot trust is
+        # an operational problem, not tamper. No "TAMPERED", no backup
+        # advice: restoring a backup cannot fix a file mode.
+        print(f"Error: cannot verify the audit log: {result.reason}",
+              file=sys.stderr)
     else:
         print(f"TAMPERED: record {result.broken_seq}: {result.reason}", file=sys.stderr)
         print(
@@ -439,6 +446,11 @@ def _audit_verify(args, config) -> int:
 
 def _audit_log(args, config) -> int:
     """Print a tail of the log, filters applied before the limit."""
+    try:
+        check_key_permissions(config.data_dir)
+    except AuditError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
     if args.event is not None and args.event not in EVENTS:
         print(
             f"Error: unknown event '{args.event}'. Expected one of: "
@@ -1794,8 +1806,20 @@ def main() -> int:
         return 1
 
     # Initialize config and store
+    data_dir = resolve_data_dir()
+    if data_dir.exists() and not data_dir.is_dir():
+        print(
+            f"Error: state path {data_dir} exists and is not a "
+            "directory. Point BRUSHPASS_DATA_DIR at a directory.",
+            file=sys.stderr,
+        )
+        return 1
     config = Config()
-    store = TokenStore(config.data_dir)
+    try:
+        store = TokenStore(config.data_dir)
+    except StorageError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
 
     # Minting and matching both need the scanner key, which fingerprints
     # the token so a later scan can recognise it. Fail closed if it is
@@ -1830,10 +1854,9 @@ def main() -> int:
     if handler:
         try:
             return handler(args, config, store, scanner)
-        except (CredentialKeyError, CredentialError) as e:
-            # The credential store refuses to guess about a key it cannot
-            # trust; that refusal must reach the operator, not a
-            # traceback.
+        except (CredentialKeyError, CredentialError, StorageError) as e:
+            # Operational failures — an untrusted key, a corrupt store —
+            # must reach the operator as an error line, not a traceback.
             print(f"Error: {e}", file=sys.stderr)
             return 1
     else:

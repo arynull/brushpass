@@ -1,5 +1,6 @@
 """Configuration management for brushpass."""
 
+import os
 from pathlib import Path
 
 import yaml
@@ -10,6 +11,14 @@ DEFAULT_CONFIG = {
     "default_ttl": DEFAULT_TTL,
     "max_ttl": MAX_TTL,
 }
+
+
+def resolve_data_dir() -> Path:
+    """The state directory: $BRUSHPASS_DATA_DIR, else ~/.brushpass."""
+    data_dir = os.environ.get("BRUSHPASS_DATA_DIR")
+    if data_dir:
+        return Path(data_dir)
+    return Path.home() / ".brushpass"
 
 
 class Config:
@@ -24,11 +33,7 @@ class Config:
     @staticmethod
     def _default_config_dir() -> Path:
         """Get default config directory."""
-        import os
-        data_dir = os.environ.get("BRUSHPASS_DATA_DIR")
-        if data_dir:
-            return Path(data_dir)
-        return Path.home() / ".brushpass"
+        return resolve_data_dir()
 
     def _load(self) -> None:
         """Load configuration from file, creating defaults if needed."""

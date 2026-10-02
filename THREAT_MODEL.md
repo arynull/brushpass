@@ -35,8 +35,10 @@ promise. If you operate brushpass, read this before trusting it.
 
 - Can present arbitrary strings to `verify` (forgery, truncation,
   bit-flips, wrong prefixes).
-- Can request any scope string (injection, unicode, case games,
-  wildcard abuse — the scope grammar rejects all of these at parse).
+- Can request any scope string (injection, unicode tricks, wildcard
+  abuse — the scope grammar rejects all of these at parse; differently
+  cased scopes parse but match only themselves exactly, so `GITHUB:x:read`
+  never covers `github:x:read`).
 - Can read any brushpass *output* (help, errors, JSON, scan reports):
   no plaintext secret may appear there. Audit denials record hashes,
   never the presented string.
