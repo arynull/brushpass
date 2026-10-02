@@ -5,16 +5,18 @@ File permissions are strictly enforced (0600).
 
 Two things here are about propagation rather than storage.
 
-**The revocation epoch.** The store carries an integer that is bumped on
-every revoke, rotation and nuke, and each token records the epoch it was
-minted in. A token whose epoch is behind the store's is denied, in
-addition to the ``revoked`` flag and its expiry. That matters because a
-revoked *flag* is a per-token fact: it says "this one token is dead" and
-says nothing about any other. An epoch bump is a *generation* change:
-everything minted before the bump is behind the current generation, so
-one number retires a whole class of tokens — which is exactly what a
-break-glass has to be able to do when nobody has time to enumerate what
-was outstanding.
+**The revocation epoch.** The store carries an integer that is bumped by
+``revoke_all_live`` (the ``nuke`` primitive), and each token records the
+epoch it was minted in. A token whose epoch is behind the store's is
+denied, in addition to the ``revoked`` flag and its expiry. That matters
+because a revoked *flag* is a per-token fact: it says "this one token is
+dead" and says nothing about any other. An epoch bump is a *generation*
+change: everything minted before the bump is behind the current
+generation, so one number retires a whole class of tokens — which is
+exactly what a break-glass has to be able to do when nobody has time to
+enumerate what was outstanding. Single-token ``revoke`` deliberately
+does NOT bump the generation: revoking one token must not retire its
+siblings.
 
 **Nothing here is cached.** Every public read goes back to the file. Two
 brushpass processes on the same machine are two :class:`TokenStore`
@@ -213,18 +215,18 @@ class TokenStore:
         return self._records.get(record_id)
 
     def revoke(self, record_id: str) -> bool:
-        """Revoke a token by ID. Returns True if found and revoked.
+        """Revoke a single token by ID. Returns True if found and revoked.
 
-        Bumps the generation as well, so a token this call cannot see —
-        one held by another process that has not re-read yet, or one
-        pruned out of the file — is still behind the generation and still
-        denied.
+        This is precise: only the named token dies. The generation is
+        NOT bumped — a single revocation must not retire sibling tokens
+        (that is what ``revoke_all_live`` / ``nuke`` are for). The
+        per-token ``revoked`` flag is the instrument here; verify denies
+        the token on the flag alone.
         """
         self._reload()
         record = self._records.get(record_id)
         if record and not record.revoked:
             record.revoked = True
-            self._epoch += 1
             self._save()
             return True
         return False

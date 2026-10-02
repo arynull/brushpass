@@ -156,7 +156,7 @@ ghi11111 aws:s3:bucket:*                      backup          12h          revok
 
 ### revoke
 
-Immediately invalidate a token.
+Immediately invalidate a single token.
 
 ```bash
 brushpass revoke <token-id>
@@ -169,6 +169,9 @@ brushpass revoke abc12345
 ```
 
 After revocation, `verify` will deny the token even if it hasn't expired.
+Revoking one token affects only that token — sibling tokens keep working.
+(To retire *everything* at once, see `nuke`, which bumps the revocation
+epoch.)
 
 ### prune
 
@@ -928,10 +931,12 @@ records the generation it was minted in. A token whose generation is
 behind the store's is denied, in addition to the `revoked` flag and its
 expiry.
 
-**What bumps it:** every `revoke`, every rotation's token revocation, and
-`nuke` — exactly once per operation, not once per token. A break-glass
-retires a *generation*, and a caller reading the counter sees one
-consistent jump rather than a hundred.
+**What bumps it:** `nuke` (via `revoke_all_live`) — exactly once per
+operation, not once per token. A break-glass retires a *generation*,
+and a caller reading the counter sees one consistent jump rather than a
+hundred. Single-token `revoke`, `scan --fix`, rotation and handoff-exit
+do **not** bump it: they set per-token `revoked` flags, so only the
+named tokens die.
 
 **Why it defeats stale caches.** A revoked *flag* is a per-token fact: it
 says "this one token is dead" and says nothing about any other. A broker

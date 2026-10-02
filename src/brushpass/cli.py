@@ -822,9 +822,9 @@ def cmd_revoke(
     success = store.revoke(args.token_id)
 
     if success:
-        # store.revoke bumped the epoch, which retired every other token
-        # minted before it as a side effect. The record names this id; the
-        # epoch bump is visible by comparing the mint records.
+        # store.revoke is precise: only this token's `revoked` flag is
+        # set. Sibling tokens are untouched (single revoke does not bump
+        # the revocation epoch — that is the nuke primitive's job).
         _record(_audit(config), EVENT_TOKEN_REVOKE, {"token_id": args.token_id})
 
     if args.json:
