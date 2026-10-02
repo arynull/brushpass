@@ -244,6 +244,9 @@ def _run_git(
             cwd=str(cwd) if cwd else None,
             capture_output=True,
             text=True,
+            # Git history can contain non-UTF8 bytes; strict decoding
+            # would traceback. Replacement keeps the scan usable.
+            errors="replace",
             check=False,
         )
     except FileNotFoundError as exc:
