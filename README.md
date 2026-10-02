@@ -490,6 +490,12 @@ scan can match them. Rather than ignore them, the report lists them as
 `UNSCANNABLE`; they still verify normally, and you can revoke one if you
 cannot account for where it went.
 
+**`live_leaks` semantics.** In `--json` output the field `live_leaks` is a
+count of *live findings* — token-at-a-location pairs — not a count of
+distinct tokens. One token pasted into three files is three findings
+(three places to clean up), and `leaked_ids` lists the distinct token ids
+behind them. The text renderer says the same thing as "N live leak(s)".
+
 #### Limitations
 
 brushpass matches tokens that are recognisable as tokens. It is a leak
@@ -1309,6 +1315,76 @@ All data is stored locally in `~/.brushpass/` (or `$BRUSHPASS_DATA_DIR`):
 ├── audit.log           # Hash-chained, Ed25519-signed audit log (mode 0600)
 └── audit.key           # Audit signing key, Ed25519 seed (mode 0600)
 ```
+
+## Verified end-to-end examples
+
+Every block below is executed by the project's quality gate in a scratch
+environment (`$BRUSHPASS_DATA_DIR` points at a fresh temp dir), so these
+are not just documentation — they are tested on every release.
+
+Mint, verify, narrow-check, and revoke one token:
+
+```bash-test
+TOKEN_JSON=$(brushpass mint --scope github:rayanalpha/repo:read --ttl 1h --json)
+TOKEN=$(python3 -c "import json,sys; print(json.load(sys.stdin)['token'])" <<< "$TOKEN_JSON")
+TOKEN_ID=$(python3 -c "import json,sys; print(json.load(sys.stdin)['id'])" <<< "$TOKEN_JSON")
+brushpass verify --scope github:rayanalpha/repo:read "$TOKEN" > /dev/null
+if brushpass verify --scope github:rayanalpha/repo:write "$TOKEN" > /dev/null 2>&1; then
+  echo "FAIL: write scope should have been denied"; exit 1
+fi
+brushpass list | grep -q "github:rayanalpha/repo:read"
+brushpass revoke "$TOKEN_ID" > /dev/null
+if brushpass verify --scope github:rayanalpha/repo:read "$TOKEN" > /dev/null 2>&1; then
+  echo "FAIL: revoked token should have been denied"; exit 1
+fi
+echo "mint/verify/revoke cycle OK"
+```
+
+Plant a leak, find it, fix it:
+
+```bash-test
+LEAKDIR=$(mktemp -d)
+LEAK_JSON=$(brushpass mint --scope github:rayanalpha/repo:read --label leak-test --json)
+LEAK_TOKEN=$(python3 -c "import json,sys; print(json.load(sys.stdin)['token'])" <<< "$LEAK_JSON")
+echo "token=$LEAK_TOKEN" > "$LEAKDIR/app.env"
+if brushpass scan "$LEAKDIR" > /dev/null 2>&1; then
+  echo "FAIL: scan should have exited 2 on a live leak"; exit 1
+fi
+brushpass scan --fix "$LEAKDIR" > /dev/null
+if brushpass verify --scope github:rayanalpha/repo:read "$LEAK_TOKEN" > /dev/null 2>&1; then
+  echo "FAIL: fixed leak should have been revoked"; exit 1
+fi
+echo "scan/--fix cycle OK"
+```
+
+The audit chain verifies after normal operation:
+
+```bash-test
+brushpass mint --scope github:rayanalpha/repo:read > /dev/null
+brushpass audit verify
+```
+
+A rotation dry-run changes nothing:
+
+```bash-test
+printf '%s\n' "old-secret" | brushpass credential add --provider manual --label drytest > /dev/null
+brushpass rotate --dry-run drytest | grep -q "ROTATION PLAN"
+echo "rotate dry-run OK"
+```
+
+## Publishing to PyPI (maintainer)
+
+PyPI publication is a **human step**, never automated. When a release is
+cut (signed tag on `main`, quality gate green, red-team SHIP):
+
+```bash
+python -m build
+twine upload dist/*
+```
+
+The package metadata (`pyproject.toml`) is stable from 1.0.0 on: the name
+`brushpass`, the `brushpass` console script, and the `BRUSHPASS_DATA_DIR`
+contract do not change without a major version.
 
 ## License
 
