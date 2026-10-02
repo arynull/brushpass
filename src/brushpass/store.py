@@ -28,6 +28,8 @@ killed, for as long as the process lived.
 import hashlib
 import hmac
 import json
+import os
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -117,24 +119,32 @@ class TokenStore:
             self._load()
 
     def _save(self) -> None:
-        """Save tokens to file."""
+        """Save tokens to file.
+
+        The temp file gets a unique name on every call (mkstemp): two
+        writers sharing one state dir — two threads, two processes, a
+        rotation racing a mint — must never share a temp name, or one
+        can rename the other's file away between its chmod and its
+        rename and the loser dies with FileNotFoundError. mkstemp
+        creates the file mode 0600, which is exactly what the store
+        needs, and os.replace publishes it atomically.
+        """
         data = {
             "version": 1,
             "revocation_epoch": self._epoch,
             "tokens": [rec.to_dict() for rec in self._records.values()],
         }
 
-        # Write to temp file first, then rename (atomic)
-        temp_file = self.tokens_file.with_suffix(".tmp")
+        fd, temp_name = tempfile.mkstemp(
+            dir=self.data_dir, prefix=".tokens-", suffix=".tmp"
+        )
+        temp_file = Path(temp_name)
         try:
-            with open(temp_file, "w") as f:
+            with os.fdopen(fd, "w") as f:
                 json.dump(data, f, indent=2)
 
-            # Set permissions before rename
-            temp_file.chmod(0o600)
-
-            # Atomic rename
-            temp_file.rename(self.tokens_file)
+            # mkstemp already made it 0600; publish atomically.
+            os.replace(temp_file, self.tokens_file)
         except Exception as e:
             temp_file.unlink(missing_ok=True)
             raise StorageError(f"Failed to save tokens: {e}") from e

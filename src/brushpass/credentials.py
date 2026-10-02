@@ -34,6 +34,7 @@ import hmac
 import json
 import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -312,7 +313,14 @@ class CredentialStore:
         self._ciphertexts = ciphertexts
 
     def _save(self) -> None:
-        """Write the store atomically: temp file, chmod, rename."""
+        """Write the store atomically: unique temp file, then replace.
+
+        The temp name is unique per call (mkstemp): two writers sharing
+        one state dir must never share a temp name, or one can rename
+        the other's file away mid-write and the loser crashes with
+        FileNotFoundError — exactly the failure a rotation racing a
+        mint used to hit. mkstemp creates the file mode 0600 already.
+        """
         data = {
             "version": 1,
             "credentials": [
@@ -320,11 +328,14 @@ class CredentialStore:
                 for record in self._records.values()
             ],
         }
-        temp_file = self.credentials_file.with_suffix(".tmp")
+        fd, temp_name = tempfile.mkstemp(
+            dir=self.data_dir, prefix=".credentials-", suffix=".tmp"
+        )
+        temp_file = Path(temp_name)
         try:
-            temp_file.write_text(json.dumps(data, indent=2))
-            temp_file.chmod(CREDENTIALS_FILE_MODE)
-            temp_file.rename(self.credentials_file)
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps(data, indent=2))
+            os.replace(temp_file, self.credentials_file)
         except OSError as exc:
             temp_file.unlink(missing_ok=True)
             raise CredentialError(f"Failed to save credentials: {exc}") from exc
