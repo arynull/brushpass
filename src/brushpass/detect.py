@@ -36,6 +36,12 @@ TOKEN_PATTERN = re.compile(rb"bp_[A-Za-z0-9_-]{43}")
 _B64_STANDARD = re.compile(rb"[A-Za-z0-9+/]{60,}={0,2}")
 _B64_URLSAFE = re.compile(rb"[A-Za-z0-9_-]{60,}={0,2}")
 
+# Longest glued prefix to skip when a base64 blob is fused to preceding
+# alphabet characters ("Basic<b64>" with no separating space, or a short
+# decoy block fused ahead of the real payload). 64 covers scheme words,
+# identifier-like prefixes, and a full 48-byte decoy block.
+_B64_MAX_PREFIX_TRIM = 64
+
 # Where a candidate was found. Recorded in the report so the operator can
 # tell a pasted token from a committed one.
 SOURCE_FILE = "file"
@@ -95,17 +101,22 @@ def find_candidates(data: bytes, source: str = SOURCE_RAW) -> list[Candidate]:
     Three passes, matching the documented detection algorithm:
 
     * ``raw`` — the token pattern applied directly to the content.
-    * ``base64`` — the content with all whitespace removed, long base64
-      blobs decoded, then the token pattern applied to the decoded bytes.
-      Stripping first reassembles a base64 payload wrapped across lines
-      (PEM/MIME style) or split by spaces; the reported line is where the
+    * ``base64`` — long base64 blobs decoded, then the token pattern
+      applied to the decoded bytes. Runs on the original content (where
+      whitespace delimits blobs, so a scheme word before the payload in
+      ``Authorization: Basic <b64>`` does not fuse with it) and again on
+      the whitespace-stripped content (which reassembles a payload
+      wrapped across lines, PEM/MIME style, or split by spaces). Each
+      blob is also tried with a few leading characters trimmed, because
+      stripping can fuse a scheme word to the payload (``Basic<b64>``),
+      which otherwise decodes to garbage. The reported line is where the
       encoded blob starts.
     * ``whitespace`` — the whole blob with all whitespace removed, then the
       token pattern applied, which reassembles a token wrapped across
       lines.
 
     Candidates are de-duplicated on ``(token, line)``: the same token found
-    three ways on one line is one leak, not three.
+    several ways on one line is one leak, not several.
     """
     if not data:
         return []
@@ -121,27 +132,34 @@ def find_candidates(data: bytes, source: str = SOURCE_RAW) -> list[Candidate]:
                 Candidate(token=match.group(), line=line, source=label),
             )
 
-    add(data, SOURCE_RAW)
-
-    # Whitespace-stripped text and its offset map, shared by the base64
-    # and whitespace passes. Line numbers come from the mapping, so the
-    # report still points at a real location.
-    stripped = _WHITESPACE.sub(b"", data)
-    points = _line_points(data)
-
-    for blob, offset in _base64_blobs(stripped):
-        decoded = _decode_base64(blob)
-        if not decoded:
-            continue
-        line = _line_at(points, offset)
+    def add_decoded(decoded: bytes, line: int) -> None:
         for match in TOKEN_PATTERN.finditer(decoded):
             found.setdefault(
                 (match.group(), line),
                 Candidate(token=match.group(), line=line, source=SOURCE_BASE64),
             )
 
-    # Whitespace-stripped pass, to catch a token split across line breaks.
+    add(data, SOURCE_RAW)
+
+    # Base64 pass on the original content: whitespace delimits the blobs.
+    for blob, offset in _base64_blobs(data):
+        line = bisect.bisect_left(newline_at, offset) + 1
+        for decoded in _blob_decodings(blob):
+            add_decoded(decoded, line)
+
+    # Whitespace-stripped text and its offset map, shared by the wrapped
+    # base64 pass and the whitespace pass. Line numbers come from the
+    # mapping, so the report still points at a real location.
+    stripped = _WHITESPACE.sub(b"", data)
     if stripped != data:
+        points = _line_points(data)
+
+        for blob, offset in _base64_blobs(stripped):
+            line = _line_at(points, offset)
+            for decoded in _blob_decodings(blob):
+                add_decoded(decoded, line)
+
+        # Whitespace-stripped pass, to catch a token split across line breaks.
         for match in TOKEN_PATTERN.finditer(stripped):
             line = _line_at(points, match.start())
             found.setdefault(
@@ -181,6 +199,27 @@ def _decode_base64(blob: bytes) -> bytes:
         except (binascii.Error, ValueError):
             continue
     return b""
+
+
+def _blob_decodings(blob: bytes) -> Iterable[bytes]:
+    """Yield decoded bytes for a blob and its leading-trimmed variants.
+
+    Whitespace stripping can fuse a scheme word to the payload
+    (``Authorization: Basic <b64>`` becomes ``Basic<b64>``), which decodes
+    to garbage; trimming a few leading characters realigns the true blob.
+    Every variant is tried — stopping at the first token-shaped hit would
+    let a crafted decoy hide a real token behind it. A trim that decodes
+    to bytes already yielded is skipped.
+    """
+    seen: set[bytes] = set()
+    for start in range(min(_B64_MAX_PREFIX_TRIM, len(blob)) + 1):
+        sub = blob[start:]
+        if len(sub) < 60:
+            break
+        decoded = _decode_base64(sub)
+        if decoded and decoded not in seen:
+            seen.add(decoded)
+            yield decoded
 
 
 def _line_points(data: bytes) -> tuple[list[int], list[int]]:
