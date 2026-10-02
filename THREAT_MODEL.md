@@ -24,6 +24,11 @@ promise. If you operate brushpass, read this before trusting it.
    backup, not against full account compromise.
 2. **The operator's shell.** Secrets enter via stdin or `--from-env`,
    never argv (argv is world-readable in `ps` and shell history).
+   Provider config follows the same rule: a secret-valued `--set` entry
+   must arrive as `--set KEY=env:VARNAME`, resolved from the environment
+   at add time. A literal secret-shaped `--set` value prints a loud
+   stderr warning; secret config is Fernet-encrypted at rest and rendered
+   as `<redacted>` in every output.
 3. **Provider APIs.** The only network brushpass ever makes is to
    user-configured provider endpoints during rotation.
 4. **The OS clock.** Token expiry is wall-clock expiry. A machine whose
