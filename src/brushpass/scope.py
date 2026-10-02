@@ -25,7 +25,8 @@ SCOPE_PATTERN = re.compile(
     r"(?P<resource>[^:]+)"
     r":"
     r"(?P<permission>[a-zA-Z0-9_*-]+)"
-    r"$"
+    r"\Z"  # \Z, not $: $ also matches before a trailing newline, which
+    # would admit "github:org/repo:read\n" as a valid scope
 )
 
 

@@ -2,8 +2,30 @@
 
 import hashlib
 import secrets
+import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime
+
+
+class LabelError(Exception):
+    """A label contains characters it must not."""
+
+
+def validate_label(label: str | None, what: str = "label") -> None:
+    """Reject control characters in a label.
+
+    Labels are rendered verbatim in ``list`` and ``audit log`` tables. A
+    newline or ANSI escape smuggled into a label can spoof table rows
+    (fake a status line) or hide output with cursor movements, so labels
+    are plain text: no control characters, full stop.
+    """
+    if label is None:
+        return
+    if any(unicodedata.category(ch) == "Cc" or ord(ch) == 0x7F for ch in label):
+        raise LabelError(
+            f"Invalid {what}: control characters (newlines, escape codes, "
+            "tabs) are not allowed in labels"
+        )
 
 
 @dataclass

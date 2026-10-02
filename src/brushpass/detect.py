@@ -95,8 +95,11 @@ def find_candidates(data: bytes, source: str = SOURCE_RAW) -> list[Candidate]:
     Three passes, matching the documented detection algorithm:
 
     * ``raw`` — the token pattern applied directly to the content.
-    * ``base64`` — long base64 blobs decoded, then the token pattern
-      applied to the decoded bytes.
+    * ``base64`` — the content with all whitespace removed, long base64
+      blobs decoded, then the token pattern applied to the decoded bytes.
+      Stripping first reassembles a base64 payload wrapped across lines
+      (PEM/MIME style) or split by spaces; the reported line is where the
+      encoded blob starts.
     * ``whitespace`` — the whole blob with all whitespace removed, then the
       token pattern applied, which reassembles a token wrapped across
       lines.
@@ -120,17 +123,25 @@ def find_candidates(data: bytes, source: str = SOURCE_RAW) -> list[Candidate]:
 
     add(data, SOURCE_RAW)
 
-    for blob in _base64_blobs(data):
-        decoded = _decode_base64(blob)
-        if decoded:
-            add(decoded, SOURCE_BASE64)
-
-    # Whitespace-stripped pass, to catch a token split across line breaks.
-    # Line numbers come from the mapping built while stripping, so the
+    # Whitespace-stripped text and its offset map, shared by the base64
+    # and whitespace passes. Line numbers come from the mapping, so the
     # report still points at a real location.
     stripped = _WHITESPACE.sub(b"", data)
+    points = _line_points(data)
+
+    for blob, offset in _base64_blobs(stripped):
+        decoded = _decode_base64(blob)
+        if not decoded:
+            continue
+        line = _line_at(points, offset)
+        for match in TOKEN_PATTERN.finditer(decoded):
+            found.setdefault(
+                (match.group(), line),
+                Candidate(token=match.group(), line=line, source=SOURCE_BASE64),
+            )
+
+    # Whitespace-stripped pass, to catch a token split across line breaks.
     if stripped != data:
-        points = _line_points(data)
         for match in TOKEN_PATTERN.finditer(stripped):
             line = _line_at(points, match.start())
             found.setdefault(
@@ -141,15 +152,20 @@ def find_candidates(data: bytes, source: str = SOURCE_RAW) -> list[Candidate]:
     return sorted(found.values(), key=lambda c: (c.line, c.token, c.source))
 
 
-def _base64_blobs(data: bytes) -> Iterable[bytes]:
-    """Yield long base64-ish runs, both alphabets, without duplicates."""
+def _base64_blobs(data: bytes) -> Iterable[tuple[bytes, int]]:
+    """Yield ``(blob, offset)`` for long base64-ish runs, both alphabets.
+
+    The offset is into the searched text, so callers can map it back to
+    a line number. Runs are de-duplicated on content; a repeated blob
+    keeps its first offset.
+    """
     seen: set[bytes] = set()
     for pattern in (_B64_STANDARD, _B64_URLSAFE):
         for match in pattern.finditer(data):
             blob = match.group()
             if blob not in seen:
                 seen.add(blob)
-                yield blob
+                yield blob, match.start()
 
 
 def _decode_base64(blob: bytes) -> bytes:

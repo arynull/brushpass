@@ -52,7 +52,7 @@ from .handoff import (
     run_handoff,
     validate_keep_env,
 )
-from .models import TokenRecord
+from .models import LabelError, TokenRecord, validate_label
 from .providers import (
     ConfigError,
     ProviderError,
@@ -514,6 +514,12 @@ def cmd_mint(
         # Parse and validate scope
         scope = Scope.parse(args.scope)
     except ScopeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        validate_label(args.label)
+    except LabelError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
@@ -1249,6 +1255,7 @@ def cmd_credential(
 def _cred_add(args, config, credentials, store) -> int:
     """Store a new root credential, encrypted at rest."""
     try:
+        validate_label(args.label, what="credential label")
         provider = get_provider(args.provider)
         values = provider.validate_config(_parse_typed_config(args.config_pairs))
         secret = _read_secret(args)
@@ -1262,6 +1269,9 @@ def _cred_add(args, config, credentials, store) -> int:
         print(f"Error: {e}", file=sys.stderr)
         return 1
     except CredentialError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except LabelError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 

@@ -1297,7 +1297,20 @@ All verification failures return a non-zero exit code:
 
 ### File Permissions
 
-The tokens file (`~/.brushpass/tokens.json`) is created with mode `0600`. brushpass refuses to run if this file is group or world readable. This prevents accidental credential exposure on shared systems.
+Everything under the state directory is created mode `0600` (directory
+`0700`). Two different policies apply when brushpass finds a file that
+has become group- or world-readable:
+
+- **Key files refuse to run.** `credentials.key`, `scanner.key` and
+  `audit.key` hold key material: a key that was readable by others may
+  already be disclosed, so brushpass exits with an error telling you to
+  `chmod 0600` it instead of silently continuing.
+- **Data files are repaired.** `tokens.json`, `credentials.json`,
+  `audit.log` and `journal.jsonl` hold only hashes, ciphertexts and
+  signed records — never plaintext secrets — so brushpass quietly
+  restores them to `0600` and carries on. (The file being readable meant
+  whatever could read it already did; refusing would add theatre, not
+  safety.)
 
 ### Constant-Time Comparison
 
