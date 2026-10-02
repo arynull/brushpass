@@ -290,6 +290,57 @@ class TokenStore:
                 return True
             return False
 
+    def consume(self, record_id: str, now: datetime | None = None) -> bool:
+        """Spend a single-use token. True if this call consumed it.
+
+        The first caller wins and every later one gets False. That
+        single-answer contract is what makes a replay impossible: two
+        verifiers of the same token can both pass every check they ran
+        before this call, but the reload-modify-save cycle inside
+        :meth:`_locked` is one step, so only one of them observes a live
+        record. The loser is told the token is spent and its verify fails.
+
+        False is returned — never an exception, never a partial write —
+        unless the record exists, is single-use, and is *live* at
+        ``now``: not already revoked, not stale, not expired. A record
+        that fails any of those is spent, gone or retired; spending it
+        again would report a consumption that never happened and could
+        mark a record revoked that something else still considers live
+        (an expiry race, say). Callers must treat False as a denial.
+
+        Consumption sets both the ``revoked`` flag and a separate
+        ``consumed`` flag: every check that denies a revoked token
+        already denies a consumed one, and the extra flag lets
+        callers (and ``list``) tell "spent by its one verify" apart
+        from "killed by an operator".
+
+        Implementation note: the staleness check below must NOT call
+        :meth:`is_stale`, whose ``epoch`` property re-reads the file
+        and would swap in fresh record objects, detaching the one we
+        are about to mutate (the write would be silently lost while
+        this method still returned True). The generation is captured
+        once, up front, from the reload at the top of the locked
+        cycle — no other process can bump it while we hold the lock.
+        """
+        moment = now or datetime.now(UTC)
+        with self._locked():
+            self._reload()
+            store_epoch = self._epoch
+            record = self._records.get(record_id)
+            stale = record is not None and record.effective_epoch != store_epoch
+            if (
+                record is None
+                or not record.single_use
+                or record.revoked
+                or stale
+                or record.is_expired(moment)
+            ):
+                return False
+            record.revoked = True
+            record.consumed = True
+            self._save()
+            return True
+
     def revoke_all_live(self, now: datetime | None = None) -> list[str]:
         """Revoke every token that is neither revoked nor expired.
 

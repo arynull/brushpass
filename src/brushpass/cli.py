@@ -18,6 +18,7 @@ from .audit import (
     EVENT_LEAK_FOUND,
     EVENT_ROTATE_FINISHED,
     EVENT_ROTATE_STARTED,
+    EVENT_TOKEN_CONSUMED,
     EVENT_TOKEN_EXPIRE,
     EVENT_TOKEN_MINT,
     EVENT_TOKEN_REVOKE,
@@ -115,6 +116,14 @@ def create_parser() -> argparse.ArgumentParser:
         help=(
             "Root credential this token is minted from. The label must "
             "already exist; rotating it revokes every live token carrying it"
+        ),
+    )
+    mint_parser.add_argument(
+        "--once",
+        action="store_true",
+        help=(
+            "Issue a single-use token: the first successful verify spends "
+            "it and every later verify is denied as 'consumed'"
         ),
     )
     mint_parser.add_argument(
@@ -604,6 +613,7 @@ def cmd_mint(
         expires_at=expires_at,
         fingerprint=_require_scanner(scanner).fingerprint(plaintext),
         credential_label=credential_label,
+        single_use=args.once,
     )
 
     # Store the record
@@ -635,6 +645,7 @@ def cmd_mint(
             "issued_at": token_record.issued_at.isoformat(),
             "expires_at": token_record.expires_at.isoformat(),
             "expires_in": format_expiry(expires_at, now),
+            "single_use": token_record.single_use,
         }
         print(json.dumps(output, indent=2))
     else:
@@ -651,6 +662,11 @@ def cmd_mint(
             print(
                 f"Rotating credential '{token_record.credential_label}' will revoke "
                 "this token."
+            )
+        if token_record.single_use:
+            print(
+                "Single-use token: the first successful verify spends it, and every "
+                "later verify is denied as 'consumed'."
             )
         print("Store this token securely - it will not be shown again.")
 
@@ -729,8 +745,14 @@ def cmd_verify(
 
     now = datetime.now(UTC)
 
-    # Check revoked
+    # Check revoked. A consumed token is flagged revoked too (that is
+    # how it denies), so this branch has to name the more precise reason
+    # first: "consumed" tells the caller the token did exactly one
+    # useful thing and is now spent, where "revoked" would suggest
+    # someone killed it while it was still good.
     if record.revoked:
+        if record.consumed:
+            return deny("consumed", "Token already consumed (single-use)", record)
         return deny("revoked", "Token has been revoked", record)
 
     # Check the revocation epoch, before expiry. A token minted before any
@@ -766,6 +788,42 @@ def cmd_verify(
             required_scope=str(required_scope),
         )
 
+    # Spend the token, for a single-use one, before reporting success.
+    #
+    # Placement is the whole design: every denial above has returned
+    # already, so a refused verify (wrong scope, expired, unknown) never
+    # reaches this line and therefore never consumes. That is what stops
+    # an attacker from spending somebody else's token by presenting it
+    # with bad inputs — a denial is free.
+    #
+    # Consumption is the last thing before the success print, so what
+    # gets printed is what the store now holds. If it fails, the verify
+    # fails: the operator must never be told a token is good when the
+    # store could not take it.
+    consumed = False
+    if record.single_use:
+        try:
+            consumed = store.consume(record.id, now)
+        except StorageError as e:
+            print(f"Error: could not consume single-use token: {e}", file=sys.stderr)
+            return 1
+        if not consumed:
+            # Someone else got there first: the token was spent between
+            # the checks above and the write. Exactly one verifier wins.
+            return deny("consumed", "Token already consumed (single-use)", record)
+        # A consumption is audited even though verify successes are not
+        # (see the module docstring): this is the moment a capability
+        # stops existing. Ids, scope and label — never the plaintext.
+        _record(
+            audit,
+            EVENT_TOKEN_CONSUMED,
+            {
+                "token_id": record.id,
+                "scope": record.scope,
+                "label": record.label,
+            },
+        )
+
     # Success
     if args.json:
         output = {
@@ -776,6 +834,8 @@ def cmd_verify(
             "issued_at": record.issued_at.isoformat(),
             "expires_at": record.expires_at.isoformat(),
             "expires_in": format_expiry(record.expires_at, now),
+            "single_use": record.single_use,
+            "consumed": consumed,
         }
         print(json.dumps(output, indent=2))
     else:
@@ -785,6 +845,8 @@ def cmd_verify(
         if record.label:
             print(f"Label: {record.label}")
         print(f"Expires in: {format_expiry(record.expires_at, now)}")
+        if consumed:
+            print("Single-use token consumed - this verify was the last one it allows.")
 
     return 0
 
@@ -813,6 +875,8 @@ def cmd_list(
                     "expires_in": format_expiry(r.expires_at, now),
                     "revoked": r.revoked,
                     "expired": r.is_expired(now),
+                    "single_use": r.single_use,
+                    "consumed": r.consumed,
                 }
                 for r in sorted(records, key=lambda x: x.issued_at, reverse=True)
             ]
@@ -830,7 +894,19 @@ def cmd_list(
         print("-" * 100)
 
         for r in sorted(records, key=lambda x: x.issued_at, reverse=True):
-            status = "revoked" if r.revoked else ("expired" if r.is_expired(now) else "active")
+            # "consumed" outranks "revoked": a spent single-use token is
+            # also flagged revoked (that is how it denies), but the
+            # operator's question differs. "once" rides along on a token
+            # that is still spendable, so its status says what will
+            # happen to it rather than only what it is now.
+            if r.consumed:
+                status = "consumed"
+            elif r.revoked:
+                status = "revoked"
+            else:
+                status = "expired" if r.is_expired(now) else "active"
+                if r.single_use:
+                    status = f"{status} once"
             label = r.label or "-"
             credential = r.credential_label or "-"
             expires_in = format_expiry(r.expires_at, now)

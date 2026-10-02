@@ -118,6 +118,11 @@ _HASH_EXCLUDED = ("record_hash", "signature")
 EVENT_TOKEN_MINT = "token.mint"
 EVENT_TOKEN_REVOKE = "token.revoke"
 EVENT_TOKEN_EXPIRE = "token.expire"
+# A single-use token (mint --once) spent by a successful verify. Unlike
+# an ordinary verify success — which is deliberately unaudited — this
+# one is the moment a capability stops existing, so it leaves a record.
+# Ids and scope only: never the plaintext that just died.
+EVENT_TOKEN_CONSUMED = "token.consumed"
 EVENT_VERIFY_DENIED = "token.verify_denied"
 EVENT_LEAK_FOUND = "leak.found"
 EVENT_CREDENTIAL_ADD = "credential.add"
@@ -130,6 +135,7 @@ EVENTS = (
     EVENT_TOKEN_MINT,
     EVENT_TOKEN_REVOKE,
     EVENT_TOKEN_EXPIRE,
+    EVENT_TOKEN_CONSUMED,
     EVENT_VERIFY_DENIED,
     EVENT_LEAK_FOUND,
     EVENT_CREDENTIAL_ADD,

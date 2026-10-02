@@ -116,6 +116,19 @@ class TokenRecord:
     # whose epoch differs from the store's is denied even when its
     # revoked flag is still False.
     epoch: int | None = None
+    # Single-use (mint --once): the first *successful* verify consumes it
+    # by setting `revoked`. Absent on records minted before v1.1.0 — those
+    # default to False and stay multi-use, exactly as they behaved on
+    # release. Consumption is a mutation like any other, so the store's
+    # lock serialises it (see store.consume).
+    single_use: bool = False
+    # Set by TokenStore.consume alongside `revoked`, so the two ways a
+    # dead single-use token ends stay distinguishable: revoked by
+    # someone, or spent by a verify. Both deny identically, but an
+    # operator reading `list` is asking a different question about each
+    # ("did I kill it?" vs "did it get used?"). Absent on records minted
+    # before v1.1.0, which can never have been consumed.
+    consumed: bool = False
 
     @classmethod
     def create(
@@ -128,6 +141,7 @@ class TokenRecord:
         parent_id: str | None = None,
         fingerprint: str | None = None,
         credential_label: str | None = None,
+        single_use: bool = False,
     ) -> tuple["TokenRecord", str]:
         """Create a new token record. Returns (record, plaintext_token)."""
         token_hash = hashlib.sha256(plaintext_token.encode()).hexdigest()
@@ -144,6 +158,7 @@ class TokenRecord:
             parent_id=parent_id,
             fingerprint=fingerprint,
             credential_label=credential_label,
+            single_use=single_use,
         ), plaintext_token
 
     @staticmethod
@@ -172,6 +187,8 @@ class TokenRecord:
             "fingerprint": self.fingerprint,
             "credential_label": self.credential_label,
             "epoch": self.epoch,
+            "single_use": self.single_use,
+            "consumed": self.consumed,
         }
 
     @classmethod
@@ -198,6 +215,13 @@ class TokenRecord:
             # generation a record with no stamp counts as, so a bump can
             # retire the whole pre-epoch population.
             epoch=data.get("epoch"),
+            # Absent on tokens minted before v1.1.0, which predate
+            # single-use tokens. False, not a guess: those records are
+            # multi-use and must stay verifiable more than once.
+            single_use=data.get("single_use", False),
+            # Absent on tokens minted before v1.1.0, which predate
+            # single-use tokens and so can never be consumed.
+            consumed=data.get("consumed", False),
         )
 
     @property
