@@ -1127,6 +1127,16 @@ def cmd_handoff(
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
+    # The handoff label is rendered in `list` like any other label, so it
+    # gets the same validation as `mint --label` (S3 row-spoofing applies
+    # here too).
+    try:
+        validate_label(args.label)
+    except LabelError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    audit = _audit(config)
     try:
         session, parent = mint_handoff_token(
             store,
@@ -1140,13 +1150,33 @@ def cmd_handoff(
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
+    # The handoff token's lifecycle is audited like any minted token's:
+    # a handoff that left no trace would be a gap in the forensic record.
+    _record(
+        audit,
+        EVENT_TOKEN_MINT,
+        {
+            "token_id": session.token_id,
+            "scope": session.record.scope,
+            "label": session.record.label,
+            "via": "handoff",
+            "expires_at": session.record.expires_at.isoformat(),
+            "epoch": session.record.effective_epoch,
+        },
+    )
+
     try:
         child_env = build_child_env(
             os.environ, session.plaintext, session.token_id, keep
         )
     except HandoffError as e:
         # Could not build the environment; never leave the token live.
-        store.revoke(session.token_id)
+        if store.revoke(session.token_id):
+            _record(
+                audit,
+                EVENT_TOKEN_REVOKE,
+                {"token_id": session.token_id, "via": "handoff"},
+            )
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
@@ -1160,9 +1190,16 @@ def cmd_handoff(
     print(f"{TOKEN_ENV_VAR} and {TOKEN_ID_ENV_VAR} are injected; parent env is scrubbed.")
     print()
 
-    return run_handoff(
+    returncode = run_handoff(
         store, session, agent_cmd, child_env, notify=_stderr_notify
     )
+    # run_handoff revokes on every exit path; the record lands here so the
+    # token's death is audited even though the revocation itself happens
+    # inside the runner (including its signal paths).
+    _record(
+        audit, EVENT_TOKEN_REVOKE, {"token_id": session.token_id, "via": "handoff"}
+    )
+    return returncode
 
 
 def _read_secret(args) -> str:
