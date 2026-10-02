@@ -217,6 +217,18 @@ def load_data_key(data_dir: Path) -> bytes:
             "backup, or remove the file to generate a new key. Existing secrets "
             "cannot be decrypted with a new key — they must be re-added"
         )
+    try:
+        # Validate the shape now: a truncated or corrupted key must fail
+        # here as CredentialKeyError, not deep inside an encrypt/decrypt
+        # call as a bare ValueError. This is the "not a valid Fernet key"
+        # case the docstring promises.
+        _fernet_types()[0](key)
+    except ValueError as exc:
+        raise CredentialKeyError(
+            f"Refusing to run: credential key {path} is not a valid Fernet "
+            f"key ({exc}). Restore a valid backup, or remove the file to "
+            "generate a new key"
+        ) from exc
     return key
 
 
