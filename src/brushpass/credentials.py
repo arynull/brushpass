@@ -39,6 +39,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .models import TOKEN_MATERIAL_PATTERN
+
 
 def _fernet_types():
     """Import the Fernet primitives on demand.
@@ -84,8 +86,8 @@ def validate_label(label: str) -> str:
     """Validate a credential label and return it stripped.
 
     Raises:
-        CredentialError: if the label is empty, too long, or contains
-            anything outside ``[A-Za-z0-9._-]``.
+        CredentialError: if the label is empty, too long, contains
+            anything outside ``[A-Za-z0-9._-]``, or is shaped like a token.
     """
     candidate = (label or "").strip()
     if not candidate:
@@ -98,6 +100,15 @@ def validate_label(label: str) -> str:
         )
     if candidate in {".", ".."}:
         raise CredentialError(f"Invalid credential label: '{label}'")
+    if TOKEN_MATERIAL_PATTERN.search(candidate):
+        # A token-shaped credential label would make the audit writer
+        # refuse the nuke record naming it, leaving the break-glass
+        # without a forensic trace. Fail closed at input.
+        raise CredentialError(
+            f"Invalid credential label: '{label}'. Labels must not contain "
+            "anything shaped like a brushpass token (the 'bp_' prefix is "
+            "reserved for tokens)"
+        )
     return candidate
 
 

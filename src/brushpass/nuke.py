@@ -54,6 +54,7 @@ from .journal import (
     new_rotation_id,
     now_iso,
 )
+from .models import TOKEN_MATERIAL_PATTERN
 from .store import TokenStore
 
 # The reason recorded against a credential a nuke left needing rotation.
@@ -112,7 +113,14 @@ class NukeResult:
             "epoch_before": self.epoch_before,
             "epoch_after": self.epoch_after,
             "credentials_flagged": self.credential_count,
-            "credential_labels": list(self.credentials_flagged),
+            # A token-shaped credential label (possible only via a
+            # hand-edited credentials.json — `credential add` rejects
+            # them) would make the audit writer refuse this whole record.
+            # Redact the shape, keep the fact that a nuke happened.
+            "credential_labels": [
+                TOKEN_MATERIAL_PATTERN.sub("<token-shaped-label>", label)
+                for label in self.credentials_flagged
+            ],
             "rotated": list(self.rotated),
             "manual_skipped": list(self.manual_skipped),
         }

@@ -67,7 +67,10 @@ brushpass mint --scope <provider:resource:permission> [--ttl <duration>] [--labe
 **Arguments:**
 - `--scope` (required): The scope triple defining what this token can access
 - `--ttl`: Time-to-live. Default: 2h, Maximum: 24h
-- `--label`: Optional human-readable label
+- `--label`: Optional human-readable label. Plain text only — no control
+  characters, and nothing shaped like a token (`bp_` + 20 or more base64
+  chars is rejected, since it would suppress the audit record). The
+  `bp_` prefix is reserved for tokens.
 
 **Examples:**
 

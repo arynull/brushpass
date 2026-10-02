@@ -73,6 +73,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .models import TOKEN_MATERIAL_PATTERN
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from cryptography.hazmat.primitives.asymmetric.ed25519 import (
         Ed25519PrivateKey,
@@ -131,8 +133,8 @@ EVENTS = (
 # A brushpass token is `bp_` plus 43 URL-safe characters. Any value
 # matching this is treated as live credential material and refused,
 # which turns "do not log token plaintext" from a convention into an
-# enforced invariant.
-TOKEN_MATERIAL_PATTERN = re.compile(r"bp_[A-Za-z0-9_-]{20,}")
+# enforced invariant. The pattern lives in models (imported above) so
+# label validation and the audit writer enforce the same shape.
 
 # `--since 24h`, `--since 7d`, ... Unlike a TTL this is unbounded: the
 # question "what happened last week" has no ceiling.

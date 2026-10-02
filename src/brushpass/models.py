@@ -1,6 +1,7 @@
 """Data models for brushpass tokens."""
 
 import hashlib
+import re
 import secrets
 import unicodedata
 from dataclasses import dataclass
@@ -11,13 +12,26 @@ class LabelError(Exception):
     """A label contains characters it must not."""
 
 
+# Anything shaped like token material. Deliberately broader than the exact
+# 43-char token shape: even a fragment must never reach the audit log
+# (audit._reject_token_material uses this same pattern), and a label
+# carrying it would suppress the audit record for the operation.
+TOKEN_MATERIAL_PATTERN = re.compile(r"bp_[A-Za-z0-9_-]{20,}")
+
+
 def validate_label(label: str | None, what: str = "label") -> None:
-    """Reject control characters in a label.
+    """Reject control characters and token-shaped content in a label.
 
     Labels are rendered verbatim in ``list`` and ``audit log`` tables. A
     newline or ANSI escape smuggled into a label can spoof table rows
     (fake a status line) or hide output with cursor movements, so labels
     are plain text: no control characters, full stop.
+
+    A label shaped like a token (``bp_`` + 20 or more base64 chars) is
+    rejected too: it is either a pasted token — which must never be stored
+    as a label — or an attempt to make the audit writer refuse the record
+    for the operation, leaving no forensic trace. The ``bp_`` prefix is
+    brushpass's token namespace; labels must not use it.
     """
     if label is None:
         return
@@ -25,6 +39,11 @@ def validate_label(label: str | None, what: str = "label") -> None:
         raise LabelError(
             f"Invalid {what}: control characters (newlines, escape codes, "
             "tabs) are not allowed in labels"
+        )
+    if TOKEN_MATERIAL_PATTERN.search(label):
+        raise LabelError(
+            f"Invalid {what}: labels must not contain anything shaped like "
+            "a brushpass token (the 'bp_' prefix is reserved for tokens)"
         )
 
 
