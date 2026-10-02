@@ -65,6 +65,29 @@ def validate_label(label: str | None, what: str = "label") -> None:
         )
 
 
+# Characters that must never reach terminal output unescaped, by Unicode
+# general category: the same set validate_label rejects. Paths (unlike
+# labels) cannot be rejected at input — they are filesystem facts — so
+# they are sanitized at render time instead.
+_UNSAFE_FOR_DISPLAY = ("Cc", "Cf", "Zl", "Zp", "Cs")
+
+
+def sanitize_for_display(value: str) -> str:
+    """Replace terminal-unsafe characters with U+FFFD.
+
+    File paths are attacker-influenced and rendered verbatim in scan
+    reports and audit output; a newline fakes report lines and ANSI
+    escapes erase them. The stored data keeps the true value — this is
+    for human-readable rendering only.
+    """
+    return "".join(
+        "\ufffd"
+        if unicodedata.category(ch) in _UNSAFE_FOR_DISPLAY or ord(ch) == 0x7F
+        else ch
+        for ch in value
+    )
+
+
 @dataclass
 class TokenRecord:
     """Stored record for a minted token (hash only, never plaintext)."""

@@ -24,7 +24,7 @@ from pathlib import Path
 
 from . import detect, sources
 from .detect import Candidate, FingerprintIndex
-from .models import TokenRecord
+from .models import TokenRecord, sanitize_for_display
 from .scanner import Scanner
 from .store import TokenStore
 
@@ -145,7 +145,11 @@ def scan_blobs(
             report.count_skip(blob.skipped or "unknown")
             continue
         if blob.note:
-            report.notes.append(f"{blob.location}: {blob.note}")
+            # The location is attacker-influenced (a filename); sanitize
+            # it for display so a newline/escape cannot spoof the report.
+            report.notes.append(
+                f"{sanitize_for_display(blob.location)}: {blob.note}"
+            )
 
         report.blobs_scanned += 1
         for candidate in detect.find_candidates(blob.data or b"", blob.source):
@@ -209,8 +213,11 @@ def render_text(report: ScanReport) -> str:
             lines.append(f"{finding.record.id}  {finding.record.scope}  [{state}]")
             lines.append(f"  label:       {label}")
             lines.append(f"  fingerprint: {finding.fingerprint_prefix}...")
+            # The location is a filesystem path — attacker-influenced —
+            # so it is sanitized for display. A newline would fake report
+            # lines; an ANSI escape would erase them.
             lines.append(
-                f"  location:    {finding.location}"
+                f"  location:    {sanitize_for_display(finding.location)}"
                 f" (via {finding.how}, source {finding.source})"
             )
             lines.append(f"  issued_at:   {finding.record.issued_at.isoformat()}")

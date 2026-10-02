@@ -80,7 +80,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .models import TOKEN_MATERIAL_PATTERN
+from .models import TOKEN_MATERIAL_PATTERN, sanitize_for_display
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -496,7 +496,13 @@ def _jsonable(details: dict) -> dict:
 
 
 def _scalar(value: object) -> str:
-    """Render a detail value compactly for the human-readable log."""
+    """Render a detail value compactly for the human-readable log.
+
+    String content is sanitized for display: audit details can carry
+    attacker-influenced values (file paths in leak.found records), and
+    a newline or ANSI escape would spoof or erase output rows. The
+    stored record keeps the true value.
+    """
     if value is None:
         return "-"
     if isinstance(value, bool):
@@ -505,7 +511,7 @@ def _scalar(value: object) -> str:
         return ",".join(_scalar(item) for item in value) if value else "-"
     if isinstance(value, dict):
         return canonical_json(value)
-    return str(value)
+    return sanitize_for_display(str(value))
 
 
 # --------------------------------------------------------------------------
