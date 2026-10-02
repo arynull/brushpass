@@ -35,14 +35,15 @@ jobs:
           TOKEN_JSON="$($BP mint --scope github:rayanalpha/repo:read --ttl 1h --json)"
           TOKEN="$(python3 -c "import json,sys; print(json.load(sys.stdin)['token'])" <<< "$TOKEN_JSON")"
           TOKEN_ID="$(python3 -c "import json,sys; print(json.load(sys.stdin)['id'])" <<< "$TOKEN_JSON")"
-          $BP verify --scope github:rayanalpha/repo:read "$TOKEN"
+          # the token is a secret: it enters via stdin, never argv
+          printf '%s' "$TOKEN" | $BP verify --scope github:rayanalpha/repo:read
           # a wider scope must be denied (exit 1)
-          if $BP verify --scope github:rayanalpha/repo:write "$TOKEN" >/dev/null 2>&1; then
+          if printf '%s' "$TOKEN" | $BP verify --scope github:rayanalpha/repo:write >/dev/null 2>&1; then
             echo "scope escalation was not denied"; exit 1
           fi
           $BP revoke "$TOKEN_ID"
           # a revoked token must be denied (exit 1)
-          if $BP verify --scope github:rayanalpha/repo:read "$TOKEN" >/dev/null 2>&1; then
+          if printf '%s' "$TOKEN" | $BP verify --scope github:rayanalpha/repo:read >/dev/null 2>&1; then
             echo "revoked token was not denied"; exit 1
           fi
           $BP audit verify
