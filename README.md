@@ -818,7 +818,10 @@ a record commits to its own position; `prev_hash` links it to the one
 before; `signature` is Ed25519 over the hash under `~/.brushpass/audit.key`.
 
 `audit verify` replays from seq 0 and reports the **first** broken seq —
-the only number an incident responder needs.
+the only number an incident responder needs. Wiping the log is not a
+way around it: an existing-but-empty log file verifies TAMPERED, and a
+deleted log file verifies TAMPERED while the signing key survives —
+only a never-used state dir honestly reports "0 records".
 
 ```console
 $ brushpass audit verify

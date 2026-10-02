@@ -637,6 +637,35 @@ class AuditLog:
         """
         lines = self._raw_lines()
         if not lines:
+            if self.path.exists():
+                # Nothing in brushpass ever creates an empty audit log: the
+                # first record creates the file with content. A file that
+                # exists but holds no records was wiped.
+                return VerifyResult(
+                    ok=False,
+                    records=0,
+                    broken_seq=0,
+                    reason=(
+                        "the audit log exists but contains no records: it "
+                        "was wiped. Restore the log from a backup, or treat "
+                        "every action since the last verified backup as "
+                        "unaccounted for"
+                    ),
+                )
+            if (self.data_dir / "audit.key").exists():
+                # The signing key is created inside record(), before the
+                # first append: a key with no log file means the log was
+                # deleted outright.
+                return VerifyResult(
+                    ok=False,
+                    records=0,
+                    broken_seq=0,
+                    reason=(
+                        "the audit signing key exists but the audit log is "
+                        "missing: the log was deleted. Restore it from a "
+                        "backup"
+                    ),
+                )
             return VerifyResult(ok=True, records=0)
 
         try:

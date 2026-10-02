@@ -11,7 +11,7 @@ promise. If you operate brushpass, read this before trusting it.
 | Root credentials (long-lived upstream secrets) | `credentials.json`, Fernet-encrypted (AES-128-CBC + HMAC-SHA256) | Data key in `credentials.key` (0600); never logged, never in argv |
 | Scanner key | `scanner.key` (0600) | Lets an attacker *test guesses*, never recover tokens |
 | Audit signing key | `audit.key` (0600), Ed25519 seed | Tamper-evidence for the audit log |
-| Audit log | `audit.log`, hash-chained + signed | Any edit, deletion, or reorder is detected by `audit verify`, which names the exact first-broken sequence |
+| Audit log | `audit.log`, hash-chained + signed | Any edit, deletion, or reorder of records is detected by `audit verify`, which names the exact first-broken sequence. Wiping the log to empty is detected (an existing-but-empty log file is TAMPERED); deleting the file outright is detected while the signing key survives (a key with no log is TAMPERED). Only a never-used state dir verifies clean as "0 records" |
 | Rotation journal | `journal.jsonl`, append-only | Crash recovery: a killed rotation is visible in `rotate --status`, never silent |
 
 ## Trust boundaries
