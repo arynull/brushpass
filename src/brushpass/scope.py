@@ -12,7 +12,10 @@ Examples:
 """
 
 import re
+import unicodedata
 from dataclasses import dataclass
+
+from .models import TOKEN_MATERIAL_PATTERN
 
 # Pattern: provider:resource:permission
 # - provider: alphanumeric, hyphens, underscores (no wildcards)
@@ -63,6 +66,32 @@ class Scope:
             raise ScopeError("Resource cannot be empty")
         if not permission:
             raise ScopeError("Permission cannot be empty")
+
+        # Scopes are rendered verbatim in `list`, `scan` and `verify`
+        # output and land in audit details. A newline/escape/U+202E in
+        # the resource would spoof those tables exactly like a hostile
+        # label, and token-shaped content would make the audit writer
+        # refuse the record — so both are rejected at parse, the same
+        # bar labels are held to.
+        for part, name in (
+            (provider, "provider"),
+            (resource, "resource"),
+            (permission, "permission"),
+        ):
+            if any(
+                unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp", "Cs")
+                or ord(ch) == 0x7F
+                for ch in part
+            ):
+                raise ScopeError(
+                    f"Invalid scope {name}: control and format characters "
+                    "are not allowed"
+                )
+            if TOKEN_MATERIAL_PATTERN.search(part):
+                raise ScopeError(
+                    f"Invalid scope {name}: must not contain anything shaped "
+                    "like a brushpass token"
+                )
 
         return cls(provider=provider, resource=resource, permission=permission)
 
