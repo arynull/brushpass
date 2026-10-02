@@ -843,17 +843,28 @@ Now the honest part. This proves the log has not been altered **by anyone
 without `audit.key`**. The key sits in the same `0700` directory as the
 log, so this is tamper-evidence against disclosure of a single artefact,
 a leaked backup, or another account on the box — the same boundary the
-encrypted credential store draws. It does **not** prove the log is
-complete:
+encrypted credential store draws.
 
-- **Truncation is invisible locally.** An attacker who can rewrite the
-  file can drop the tail, and the remaining chain is still internally
-  consistent. Nothing in the file can detect it. To catch it, anchor the
-  head hash somewhere they cannot reach.
-- **Deletion is invisible locally.** Removing the log entirely looks
-  exactly like a fresh install. `audit verify` reports a missing log as
-  zero records, which is true of both. Check the file's *existence* in
-  your monitoring, not just its integrity.
+Two deletions the log *does* catch locally:
+
+- **Wiping is detected.** An existing-but-empty log file verifies as
+  TAMPERED (nothing in brushpass ever creates an empty log), and a
+  missing log with a surviving key verifies as TAMPERED. Only a
+  never-used state dir verifies clean as "0 records".
+- **Tail truncation is detected.** Every append also writes
+  `audit.counter`, a high-water mark holding the `(seq, record_hash)` of
+  the last record written. `audit verify` compares the log's actual tail
+  against it: a log shorter than the mark names the first missing
+  sequence. (A mark lost to a crash — the log append made it, the counter
+  write didn't — is *not* flagged: the log is the truth there, and verify
+  repairs the counter on the way out.)
+
+What it does **not** prove is completeness against an attacker who owns
+the whole state dir: someone who can consistently rewrite the log *and*
+the counter (or steal `audit.key` and forge the chain outright) defeats
+local verification. That is the same boundary as full account compromise,
+and it is out of scope — anchor the head hash somewhere they cannot
+reach (off-machine backups) if you need that.
 
 `audit log` prints the head hash of the last record shown for exactly
 this reason:

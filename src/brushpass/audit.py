@@ -67,6 +67,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -83,6 +84,13 @@ AUDIT_KEY_NAME = "audit.key"
 AUDIT_LOG_MODE = 0o600
 AUDIT_KEY_MODE = 0o600
 AUDIT_KEY_BYTES = 32  # an Ed25519 seed
+
+# High-water mark for tail-truncation detection. A hash chain alone cannot
+# see a truncated tail — a prefix of a valid log is a valid log — so every
+# append also records the (seq, record_hash) of the last record written.
+# verify() compares the log's actual tail against this mark.
+AUDIT_COUNTER_NAME = "audit.counter"
+AUDIT_COUNTER_MODE = 0o600
 
 # prev_hash of seq 0. A chain has to start somewhere, and "somewhere" is
 # not a hash of anything.
@@ -502,6 +510,7 @@ class AuditLog:
     def __init__(self, data_dir: Path):
         self.data_dir = data_dir
         self.path = data_dir / AUDIT_LOG_NAME
+        self.counter_path = data_dir / AUDIT_COUNTER_NAME
 
     # ---- writing -------------------------------------------------------
 
@@ -550,6 +559,18 @@ class AuditLog:
             line = (json.dumps(data, sort_keys=True) + "\n").encode()
             os.write(fd, line)
             os.fsync(fd)
+            # The high-water mark, written while the exclusive lock is
+            # still held so it always matches the record just appended.
+            # A crash between the log fsync and this write leaves the
+            # counter behind the log; verify() treats a log *longer* than
+            # the counter as a lost update, not tamper, so this ordering
+            # cannot produce a false TAMPERED.
+            try:
+                self._write_counter(next_seq, record_hash)
+            except OSError as exc:
+                raise AuditError(
+                    f"Cannot write audit counter {self.counter_path}: {exc}"
+                ) from exc
         except OSError as exc:
             raise AuditError(f"Cannot append to audit log {self.path}: {exc}") from exc
         finally:
@@ -567,6 +588,49 @@ class AuditLog:
             pass
 
         return AuditRecord.from_dict(data)
+
+    def _write_counter(self, seq: int, record_hash: str) -> None:
+        """Persist the high-water mark: the last appended (seq, hash).
+
+        Written atomically (unique temp file + rename + directory fsync),
+        so a crash can never leave a half-written counter behind. Call
+        with the log's exclusive lock held.
+        """
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            dir=self.data_dir, prefix="audit.counter.", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(tmp_fd, "w") as fh:
+                json.dump({"seq": seq, "record_hash": record_hash}, fh)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.chmod(tmp_path, AUDIT_COUNTER_MODE)
+            os.replace(tmp_path, self.counter_path)
+            dir_fd = os.open(self.data_dir, os.O_DIRECTORY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    def _read_counter(self) -> tuple[int, str] | None:
+        """The persisted high-water mark, or None when there isn't one.
+
+        None covers: installs predating the counter, a data dir with no
+        records yet, and a counter file too damaged to parse. A damaged
+        counter falls back to the chain check alone — verify() never
+        cries tamper over its own bookkeeping.
+        """
+        try:
+            data = json.loads(self.counter_path.read_text(encoding="utf-8"))
+            return int(data["seq"]), str(data["record_hash"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
 
     def _ensure_dir(self) -> None:
         if self.data_dir.exists():
@@ -772,6 +836,45 @@ class AuditLog:
                 )
 
             previous = stored
+
+        # The chain is internally consistent. Now the high-water mark: a
+        # truncated tail is still a valid chain, so without this check a
+        # deleted tail would verify clean.
+        counter = self._read_counter()
+        if counter is not None:
+            counter_seq, counter_hash = counter
+            last = json.loads(lines[-1])
+            last_seq = int(last["seq"])
+            last_hash = str(last["record_hash"])
+            if last_seq < counter_seq:
+                return VerifyResult(
+                    ok=False,
+                    records=len(lines),
+                    broken_seq=last_seq + 1,
+                    reason=(
+                        "audit log is shorter than the last recorded write "
+                        f"(log ends at seq {last_seq}, counter expects "
+                        f"seq {counter_seq}): tail records were deleted"
+                    ),
+                )
+            if last_seq == counter_seq and last_hash != counter_hash:
+                return VerifyResult(
+                    ok=False,
+                    records=len(lines),
+                    broken_seq=last_seq,
+                    reason=(
+                        f"audit log record {last_seq} does not match the "
+                        "last recorded write: the tail record was replaced"
+                    ),
+                )
+            if last_seq > counter_seq:
+                # The counter update was lost to a crash after the log
+                # append. The record made it to disk, so the log is the
+                # truth — repair the counter rather than crying tamper.
+                try:
+                    self._write_counter(last_seq, last_hash)
+                except OSError:
+                    pass
 
         return VerifyResult(ok=True, records=len(lines))
 
