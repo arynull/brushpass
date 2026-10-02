@@ -238,6 +238,7 @@ def run_handoff(
     child_env: Mapping[str, str],
     notify: Notify | None = None,
     grace: float = SIGNAL_GRACE_SECONDS,
+    on_revoke: Callable[[], None] | None = None,
 ) -> int:
     """Run ``agent_cmd`` with the token injected; revoke on every exit path.
 
@@ -246,6 +247,12 @@ def run_handoff(
     convention 128+signal (what a shell itself would report), never as a
     negative number — negative exit values are truncated modulo 256 by the
     kernel and would reach the caller as 247 for SIGKILL.
+
+    ``on_revoke`` fires exactly once, when the revocation is actually
+    performed — including the signal paths, where this function never
+    returns to its caller. Without it, a signalled handoff would revoke
+    the token but leave no audit record, and an investigator would see a
+    mint with no matching revoke.
     """
     say: Notify = notify or (lambda _message: None)
     command = list(agent_cmd)
@@ -259,7 +266,13 @@ def run_handoff(
         if revoked:
             return False
         revoked = True
-        return store.revoke(session.token_id)
+        did = store.revoke(session.token_id)
+        # The audit record is written here, not by the caller afterwards:
+        # the signal paths below never return to the caller, so a record
+        # written there would be skipped exactly when it matters most.
+        if did and on_revoke is not None:
+            on_revoke()
+        return did
 
     def on_signal(signum: int, _frame: object) -> None:
         # Revoke first: the credential dies the moment we are signalled,

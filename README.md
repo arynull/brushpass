@@ -318,8 +318,10 @@ never handed.
 `--keep-env` is the deliberate, explicit way to widen this. It refuses to
 run if the name collides with a token variable (`BRUSHPASS_TOKEN` or
 `BRUSHPASS_TOKEN_ID`), so you cannot accidentally overwrite the
-credential you are handing over, and it fails before anything is minted
-if the variable is not set in the parent.
+credential you are handing over. If a named variable is not set in the
+parent, the handoff aborts: the token is minted, then immediately
+revoked again — none is left live — and both the mint and the revoke
+are in the audit log.
 
 #### Delegation and least privilege
 

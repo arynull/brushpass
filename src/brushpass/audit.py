@@ -42,17 +42,24 @@ What this does and does not prove, stated plainly:
   so this is tamper-evidence against disclosure of a single artefact, a
   backup, or another account on the box — the same boundary the encrypted
   credential store draws.
-* It does **not** prove the log is complete. An attacker who can rewrite
-  the whole file can truncate the tail, and no local structure can
-  detect that: the chain is still internally consistent. To catch
-  truncation, anchor the last ``record_hash`` somewhere the attacker
-  cannot reach — ship it to a log collector, or keep it out of band.
-  ``brushpass audit log`` prints the head hash of what it shows, for
-  exactly this purpose.
-* Deleting the log entirely also cannot be detected locally. Verify the
-  file's existence in whatever monitoring you have; ``audit verify``
-  reports a missing log as zero records, which is true of a fresh
-  install and equally true of a deleted one.
+* **Wiping is detected.** Nothing in brushpass ever creates an empty log,
+  so an existing-but-empty file verifies as TAMPERED, and a missing log
+  with a surviving key verifies as TAMPERED. Only a never-used state dir
+  verifies clean as "0 records".
+* **Tail truncation is detected.** Every append also writes
+  ``audit.counter``, a high-water mark holding the ``(seq, record_hash)``
+  of the last record written; ``verify`` compares the log's actual tail
+  against it and names the first missing sequence. Appending to a
+  truncated log is refused outright — the write would move the mark
+  forward and launder the deletion.
+* It does **not** prove the log is complete against an attacker who owns
+  the whole state dir: someone who consistently rewrites the log *and*
+  the counter, or steals ``audit.key`` and forges the chain, defeats
+  local verification. That is the same boundary as full account
+  compromise. To catch even that, anchor the last ``record_hash``
+  somewhere the attacker cannot reach — ship it to a log collector, or
+  keep it out of band. ``brushpass audit log`` prints the head hash of
+  what it shows, for exactly this purpose.
 
 **No secret material is ever written here.** Token plaintext is refused
 outright — :func:`_reject_token_material` walks the details and raises if

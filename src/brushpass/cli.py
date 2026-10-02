@@ -1191,13 +1191,18 @@ def cmd_handoff(
     print()
 
     returncode = run_handoff(
-        store, session, agent_cmd, child_env, notify=_stderr_notify
-    )
-    # run_handoff revokes on every exit path; the record lands here so the
-    # token's death is audited even though the revocation itself happens
-    # inside the runner (including its signal paths).
-    _record(
-        audit, EVENT_TOKEN_REVOKE, {"token_id": session.token_id, "via": "handoff"}
+        store,
+        session,
+        agent_cmd,
+        child_env,
+        notify=_stderr_notify,
+        # Fires inside run_handoff when the revocation is performed — on
+        # the normal path and the signal paths alike. A record written
+        # after run_handoff returns would be skipped on the signal paths,
+        # which never return.
+        on_revoke=lambda: _record(
+            audit, EVENT_TOKEN_REVOKE, {"token_id": session.token_id, "via": "handoff"}
+        ),
     )
     return returncode
 
