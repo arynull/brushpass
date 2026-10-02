@@ -61,11 +61,12 @@ What this does and does not prove, stated plainly:
   keep it out of band. ``brushpass audit log`` prints the head hash of
   what it shows, for exactly this purpose.
 
-**No secret material is ever written here.** Token plaintext is refused
-outright — :func:`_reject_token_material` walks the details and raises if
-any value looks like a brushpass token — and root secrets never reach
-this module at all, because the code that holds them (the credential
-store, the rotation engine) passes only labels and truncated digests.
+**No secret material is ever written here.** Token-shaped substrings in
+details are redacted to ``<redacted>`` — :func:`_redact_token_material`
+walks the details — and root secrets never reach this module at all,
+because the code that holds them (the credential store, the rotation
+engine) passes only labels and truncated digests. Redaction (not
+refusal) is deliberate: a refused record is a lost forensic record.
 """
 
 import base64
@@ -74,6 +75,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -448,37 +450,45 @@ def _create_signing_key(path: Path) -> "Ed25519PrivateKey":
 
 
 # --------------------------------------------------------------------------
-# Secret-material refusal
+# Secret-material redaction
 # --------------------------------------------------------------------------
 
 
-def _reject_token_material(details: dict, path: str = "details") -> None:
-    """Raise if any string under ``details`` looks like a token plaintext.
+def _redact_token_material(value):
+    """Replace token-shaped substrings with ``<redacted>``, recursively.
 
-    This is the enforcement behind "the audit log never contains token
-    plaintext". A reviewer can rely on it rather than on auditing every
-    call site by hand.
+    Returns ``(new_value, did_redact)``. This is the enforcement behind
+    "the audit log never contains token plaintext" — but unlike a
+    refusal, it never costs the forensic record. A refused record is a
+    lost record, and a lost record is exactly what an attacker wants;
+    redaction keeps the event (ids, labels, fingerprints, paths) while
+    the token-shaped substring never reaches the log. Callers are
+    expected to warn loudly when ``did_redact`` is true, so a call site
+    accidentally passing token material is still noticed.
     """
-    for key, value in details.items():
-        where = f"{path}.{key}"
-        if isinstance(value, str):
-            if TOKEN_MATERIAL_PATTERN.search(value):
-                raise AuditError(
-                    f"Refusing to write audit {where}: it contains something shaped "
-                    "like a brushpass token. The audit log records ids, labels and "
-                    "fingerprints only — never token material"
-                )
-        elif isinstance(value, dict):
-            _reject_token_material(value, where)
-        elif isinstance(value, (list, tuple)):
-            for index, item in enumerate(value):
-                if isinstance(item, str) and TOKEN_MATERIAL_PATTERN.search(item):
-                    raise AuditError(
-                        f"Refusing to write audit {where}[{index}]: it contains "
-                        "something shaped like a brushpass token"
-                    )
-                if isinstance(item, dict):
-                    _reject_token_material(item, f"{where}[{index}]")
+    if isinstance(value, str):
+        new_value, count = TOKEN_MATERIAL_PATTERN.subn("<redacted>", value)
+        return new_value, count > 0
+    if isinstance(value, dict):
+        redacted = False
+        out = {}
+        for key, item in value.items():
+            new_key, key_hit = (
+                _redact_token_material(key) if isinstance(key, str) else (key, False)
+            )
+            new_item, item_hit = _redact_token_material(item)
+            out[new_key] = new_item
+            redacted = redacted or key_hit or item_hit
+        return out, redacted
+    if isinstance(value, (list, tuple)):
+        out = []
+        redacted = False
+        for item in value:
+            new_item, item_hit = _redact_token_material(item)
+            out.append(new_item)
+            redacted = redacted or item_hit
+        return (tuple(out) if isinstance(value, tuple) else out), redacted
+    return value, False
 
 
 def _jsonable(details: dict) -> dict:
@@ -487,7 +497,6 @@ def _jsonable(details: dict) -> dict:
         return {}
     if not isinstance(details, dict):
         raise AuditError(f"Audit details must be a mapping, got {type(details).__name__}")
-    _reject_token_material(details)
     try:
         json.dumps(details)
     except (TypeError, ValueError) as exc:
@@ -539,11 +548,20 @@ class AuditLog:
 
         Raises:
             AuditError: if the chain cannot be continued — a damaged final
-                line, a gap, or details that would carry secret material.
-                Appending after a damaged tail would launder the tamper,
-                so brushpass stops instead.
+                line, a gap, or a log shorter than the high-water mark
+                (tail truncation). Appending after a damaged tail would
+                launder the tamper, so brushpass stops instead.
+
+        Token-shaped substrings in details are redacted to ``<redacted>``
+        (with a stderr warning), never refused: a refused record is a
+        lost forensic record.
         """
         payload = _jsonable(details or {})
+        # Token-shaped substrings are redacted, never refused: a refused
+        # record is a lost forensic record, which is what an attacker
+        # wants. The redaction is loud (stderr) so a call site
+        # accidentally passing token material is still noticed.
+        payload, redacted = _redact_token_material(payload)
         self._ensure_dir()
         key = None
         # O_RDWR, not O_WRONLY: the tail is read back from this same
@@ -615,6 +633,13 @@ class AuditLog:
             # The mode was requested at open() and umask can only have
             # narrowed it. The read path reports the real mode.
             pass
+
+        if redacted:
+            print(
+                "WARNING: audit details contained something shaped like a "
+                "brushpass token; it was redacted from the record",
+                file=sys.stderr,
+            )
 
         return AuditRecord.from_dict(data)
 
