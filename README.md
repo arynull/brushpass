@@ -860,7 +860,10 @@ Two deletions the log *does* catch locally:
   against it: a log shorter than the mark names the first missing
   sequence. (A mark lost to a crash — the log append made it, the counter
   write didn't — is *not* flagged: the log is the truth there, and verify
-  repairs the counter on the way out.)
+  repairs the counter on the way out.) Appending to a truncated log is
+  refused outright — the write would move the mark forward and launder
+  the deletion, so brushpass stops instead and tells you to restore
+  from backup.
 
 What it does **not** prove is completeness against an attacker who owns
 the whole state dir: someone who can consistently rewrite the log *and*

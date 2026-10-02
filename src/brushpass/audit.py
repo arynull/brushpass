@@ -544,6 +544,20 @@ class AuditLog:
             # that only ever reads its log never grows one.
             key = load_signing_key(self.data_dir)
             prev_hash, next_seq = self._chain_tail(fd)
+            # Fail closed on truncation. The counter is written after the
+            # log fsync under this same exclusive lock, so a counter
+            # ahead of the tail means records were deleted — a crash can
+            # only leave the counter *behind* the log, never ahead of it.
+            # Appending here would rewrite the counter to the new tail and
+            # launder the tamper, so brushpass stops instead.
+            counter = self._read_counter()
+            if counter is not None and counter[0] >= next_seq:
+                raise AuditError(
+                    f"Refusing to append to audit log {self.path}: the log "
+                    f"ends at seq {next_seq - 1} but the last recorded write "
+                    f"was seq {counter[0]} — tail records were deleted. "
+                    "Restore the log from a backup before continuing."
+                )
             data = {
                 "seq": next_seq,
                 "ts_utc": datetime.now(UTC).isoformat(),
