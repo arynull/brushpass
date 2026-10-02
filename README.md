@@ -71,6 +71,13 @@ brushpass mint --scope <provider:resource:permission> [--ttl <duration>] [--labe
   characters, and nothing shaped like a token (`bp_` + 20 or more base64
   chars is rejected, since it would suppress the audit record). The
   `bp_` prefix is reserved for tokens.
+- `--once`: Issue a single-use token. The first *successful* `verify`
+  spends it — the token is revoked atomically at that moment — and
+  every later verify is denied with reason `consumed`. A denied verify
+  never spends the token, so an attacker cannot burn someone else's
+  token by presenting it with a wrong scope. Use `--once` for
+  one-shot handoffs where replay must be impossible even within the
+  TTL window.
 
 **Examples:**
 
@@ -83,6 +90,9 @@ brushpass mint --scope aws:s3/backup-bucket:* --ttl 4h --label "backup job"
 
 # Stripe customer read access, expires in 30 minutes
 brushpass mint --scope stripe:customers:read --ttl 30m
+
+# A one-shot token: dies on its first successful verify
+brushpass mint --scope github:rayanalpha/deploy:write --ttl 10m --label "one deploy" --once
 ```
 
 **Output:**
@@ -113,7 +123,13 @@ brushpass verify --from-env MY_TOKEN --scope <required-scope>
 
 **Exit codes:**
 - `0`: Token is valid
-- `1`: Token invalid (unknown, expired, revoked, or scope mismatch)
+- `1`: Token invalid (unknown, expired, revoked, consumed, or scope mismatch)
+
+A verify that succeeds on a `--once` token spends it: the success
+output notes the consumption, and a second verify of the same token
+is denied with reason `consumed` (audited as a verify denial, like
+every other refusal). The spend itself is audited as
+`token.consumed`.
 
 **Examples:**
 
@@ -154,12 +170,19 @@ brushpass list [--json]
 **Output:**
 
 ```
-ID       SCOPE                                LABEL           EXPIRES      STATUS
---------------------------------------------------------------------------------
-abc12345 github:rayanalpha/*:read             CI agent        1h45m        active
-def67890 stripe:customers:read                -               expired      expired
-ghi11111 aws:s3:bucket:*                      backup          12h          revoked
+ID       SCOPE                               LABEL           CREDENTIAL      EXPIRES      STATUS
+----------------------------------------------------------------------------------------------------
+abc12345 github:rayanalpha/*:read            CI agent        -               1h45m        active
+def67890 stripe:customers:read               -               -               expired      expired
+ghi11111 aws:s3:bucket:*                     backup          -               12h          revoked
+jkl22222 github:rayanalpha/deploy:write      one deploy      -               9m           active once
+mno33333 github:rayanalpha/deploy:write      one deploy      -               9m           consumed
 ```
+
+Statuses: `active`, `expired`, `revoked`, and for single-use tokens
+`active once` (still spendable) and `consumed` (spent by its one
+verify — distinct from `revoked`, which means an operator killed it
+before it was used).
 
 ### revoke
 
@@ -1408,6 +1431,20 @@ if echo "$TOKEN" | brushpass verify --scope github:rayanalpha/repo:read > /dev/n
   echo "FAIL: revoked token should have been denied"; exit 1
 fi
 echo "mint/verify/revoke cycle OK"
+```
+
+A single-use token dies on its first successful verify:
+
+```bash-test
+ONCE_JSON=$(brushpass mint --scope github:rayanalpha/repo:read --ttl 1h --label single-demo --once --json)
+ONCE_TOKEN=$(python3 -c "import json,sys; print(json.load(sys.stdin)['token'])" <<< "$ONCE_JSON")
+echo "$ONCE_TOKEN" | brushpass verify --scope github:rayanalpha/repo:read > /dev/null
+if echo "$ONCE_TOKEN" | brushpass verify --scope github:rayanalpha/repo:read > /dev/null 2>&1; then
+  echo "FAIL: second verify of a single-use token should have been denied"; exit 1
+fi
+brushpass list | grep -q "consumed"
+echo "$ONCE_TOKEN" | brushpass verify --scope github:rayanalpha/repo:read --json | grep -q '"reason": "consumed"'
+echo "single-use cycle OK"
 ```
 
 Plant a leak, find it, fix it:

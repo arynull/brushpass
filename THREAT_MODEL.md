@@ -80,12 +80,22 @@ promise. If you operate brushpass, read this before trusting it.
 
 1. `verify` successes are not audited (only denials) — a deliberate
    sampling choice; the log stays a forensic record of refusals.
+   The one exception is a single-use token (`mint --once`): its
+   consumption *is* audited as `token.consumed`, because that is the
+   moment a capability stops existing.
 2. Pre-v0.3.0 tokens have no fingerprint and cannot be scan-matched;
    they are reported as UNSCANNABLE, not silently covered.
 3. The `manual` provider cannot revoke upstream; rotation reports this
    instead of pretending.
 4. Webhook notifications are best-effort; a failed webhook never fails
    a rotation.
+5. Single-use semantics are "spent on first *successful* verify", and
+   validity is judged at check time: a token verified in its last
+   live instant is consumed as valid. Concurrent verifiers are
+   serialised by the store lock, so exactly one wins, but two
+   processes that both passed every check still resolve to one
+   winner and one `consumed` denial — the guarantee is
+   exactly-once *spend*, not exactly-once *attempt*.
 
 ## Security contacts
 
