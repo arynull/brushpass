@@ -124,7 +124,15 @@ def create_parser() -> argparse.ArgumentParser:
         "verify", help="Verify a token"
     )
     verify_parser.add_argument(
-        "token", help="Token to verify"
+        "--from-env",
+        dest="from_env",
+        default=None,
+        metavar="VAR",
+        help=(
+            "Read the token from this environment variable instead of "
+            "stdin. The token is never accepted on argv: argv is "
+            "world-readable in ps and shell history."
+        ),
     )
     verify_parser.add_argument(
         "--scope", required=True, help="Required scope to check"
@@ -301,10 +309,15 @@ def create_parser() -> argparse.ArgumentParser:
         help="Output format (default: export)",
     )
     env_parser.add_argument(
-        "--token",
-        dest="token",
+        "--from-env",
+        dest="from_env",
         default=None,
-        help="Plaintext token; resolves the record for liveness checks",
+        metavar="VAR",
+        help=(
+            "Read the token from this environment variable instead of "
+            "stdin. The token is never accepted on argv: argv is "
+            "world-readable in ps and shell history."
+        ),
     )
 
     # audit command
@@ -678,6 +691,16 @@ def cmd_verify(
             print(message, file=sys.stderr)
         return 1
 
+    # The token enters via stdin or --from-env, never argv. Argv is
+    # world-readable in ps and shell history; a token on the command
+    # line is a token in every process table on the box. This is trust
+    # boundary 2 in THREAT_MODEL.md.
+    try:
+        token = _read_token(args)
+    except TokenInputError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
     # Parse required scope
     try:
         required_scope = Scope.parse(args.scope)
@@ -686,7 +709,7 @@ def cmd_verify(
         return 1
 
     # Find token
-    record = store.find_by_token(args.token)
+    record = store.find_by_token(token)
     if not record:
         # No record, so no id to log. A sha256 of the presented string is
         # stable across attempts and identifies the token without ever
@@ -694,7 +717,7 @@ def cmd_verify(
         return deny(
             "unknown_token",
             "Token not found",
-            fingerprint=hashlib.sha256(args.token.encode()).hexdigest(),
+            fingerprint=hashlib.sha256(token.encode()).hexdigest(),
         )
 
     now = datetime.now(UTC)
@@ -1237,6 +1260,57 @@ def _read_secret(args) -> str:
     return sys.stdin.readline()
 
 
+class TokenInputError(Exception):
+    """The token was not supplied via stdin or --from-env."""
+
+
+def _read_token(args) -> str:
+    """Read a token from stdin or ``--from-env``.
+
+    Never from argv: the process table is world-readable (``/proc/<pid>/
+    cmdline`` is mode 0444), so a token on the command line is visible to
+    every other user on the box and persists in shell history. This is
+    trust boundary 2 in THREAT_MODEL.md.
+
+    Raises:
+        TokenInputError: if no token was supplied.
+    """
+    if getattr(args, "from_env", None):
+        value = os.environ.get(args.from_env)
+        if value is None:
+            raise TokenInputError(
+                f"Environment variable '{args.from_env}' is not set. Export it, "
+                "or omit --from-env to pipe the token on stdin"
+            )
+        token = value.strip()
+        if not token:
+            raise TokenInputError(
+                f"Environment variable '{args.from_env}' is empty"
+            )
+        return token
+
+    if sys.stdin.isatty():
+        from getpass import getpass
+
+        try:
+            token = getpass("Token: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            raise TokenInputError("No token supplied") from None
+        if not token:
+            raise TokenInputError("No token supplied")
+        return token
+
+    # Piped stdin. readline (not read) so a trailing newline from
+    # `echo "$TOKEN" | brushpass verify` is stripped, not part of the token.
+    token = sys.stdin.readline().strip()
+    if not token:
+        raise TokenInputError(
+            "No token on stdin. Pipe the token, e.g. "
+            "`echo \"$TOKEN\" | brushpass verify --scope ...`, or use --from-env VAR"
+        )
+    return token
+
+
 def _parse_config(pairs) -> dict:
     """Parse ``--set KEY=VALUE`` pairs into a config mapping.
 
@@ -1742,30 +1816,32 @@ def cmd_env(
     store: TokenStore,
     scanner: Scanner | None,
 ) -> int:
-    """Print token material in shell format."""
-    if not args.token and not args.token_id:
-        print(
-            "Error: supply --token <plaintext> or --id <token-id>",
-            file=sys.stderr,
-        )
-        return 1
+    """Print token material in shell format.
 
+    The token enters via stdin or --from-env, never argv (trust boundary
+    2). --id resolves a record by ID but cannot re-emit the plaintext:
+    storage holds hashes only, by design.
+    """
     now = datetime.now(UTC)
     try:
-        if args.token:
-            record = find_live_by_token(store, args.token, now)
-        else:
+        if args.token_id:
             # --id alone can confirm liveness but cannot re-emit the
             # plaintext: storage holds hashes only, by design.
             record = require_live_by_id(store, args.token_id, now)
             print(
                 f"Error: token {record.id} is live, but brushpass stores only "
-                "hashes, so it cannot reprint the token. Pass the plaintext "
-                "with --token, or use 'brushpass handoff' to inject one.",
+                "hashes, so it cannot reprint the token. Pipe the plaintext "
+                "on stdin, or use 'brushpass handoff' to inject one.",
                 file=sys.stderr,
             )
             return 1
-        plaintext = args.token
+        # No --id: the token comes from stdin or --from-env.
+        try:
+            plaintext = _read_token(args)
+        except TokenInputError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+        record = find_live_by_token(store, plaintext, now)
     except EnvError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1

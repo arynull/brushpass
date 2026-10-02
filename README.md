@@ -29,7 +29,7 @@ pip install -e .
 brushpass mint --scope github:rayanalpha/*:read --label "CI agent"
 
 # Verify a token (used by your application)
-brushpass verify bp_EXAMPLE… --scope github:rayanalpha/repo:read
+echo "$TOKEN" | brushpass verify --scope github:rayanalpha/repo:read
 
 # List all tokens
 brushpass list
@@ -104,7 +104,11 @@ The token ID (first 8 chars of the SHA-256 hash) is used for `list` and `revoke`
 Check if a token is valid and has the required scope.
 
 ```bash
-brushpass verify <token> --scope <required-scope>
+# The token enters via stdin (or --from-env) — never argv. Argv is
+# world-readable in ps and shell history; a token on the command line
+# is a token in every process table on the box.
+echo "$TOKEN" | brushpass verify --scope <required-scope>
+brushpass verify --from-env MY_TOKEN --scope <required-scope>
 ```
 
 **Exit codes:**
@@ -115,16 +119,16 @@ brushpass verify <token> --scope <required-scope>
 
 ```bash
 # Check if token has read access to a specific repo
-brushpass verify bp_EXAMPLE… --scope github:rayanalpha/specific-repo:read
+echo "$TOKEN" | brushpass verify --scope github:rayanalpha/specific-repo:read
 
 # Check for write access (will fail if token only has read)
-brushpass verify bp_EXAMPLE… --scope github:rayanalpha/repo:write
+echo "$TOKEN" | brushpass verify --scope github:rayanalpha/repo:write
 ```
 
 **JSON output:**
 
 ```bash
-brushpass verify bp_EXAMPLE… --scope github:rayanalpha/repo:read --json
+echo "$TOKEN" | brushpass verify --scope github:rayanalpha/repo:read --json
 ```
 
 ```json
@@ -368,14 +372,16 @@ Print token material in a shell format, for launchers you cannot wrap in
 `handoff`.
 
 ```bash
-brushpass env --token <plaintext-token> [--format export|json|powershell]
+# The token enters via stdin (or --from-env) — never argv. Argv is
+# world-readable in ps and shell history.
+echo "$TOKEN" | brushpass env [--format export|json|powershell]
+brushpass env --from-env MY_TOKEN [--format export|json|powershell]
 brushpass env --id <token-id> [--format export|json|powershell]
 ```
 
 **Arguments:**
-- `--token`: The plaintext token. Resolves the record behind it and
-  performs the fail-closed liveness checks
-- `--id`: A token ID, for the same liveness checks
+- `--from-env`: Read the token from this environment variable instead of stdin
+- `--id`: A token ID, for the same liveness checks (cannot re-emit the plaintext)
 - `--format`: `export` (default), `json`, or `powershell`
 
 **Example:**
@@ -386,19 +392,19 @@ Token: bp_EXAMPLE_TOKEN_HERE
 ID: a1b2c3d4
 ...
 
-$ brushpass env --token bp_EXAMPLE_TOKEN_HERE
+$ echo "$TOKEN" | brushpass env
 Warning: this output contains secret token material. Prefer
 'brushpass handoff', which revokes the token when the agent exits.
 export BRUSHPASS_TOKEN='bp_EXAMPLE_TOKEN_HERE'
 export BRUSHPASS_TOKEN_ID='a1b2c3d4'
 
-$ eval "$(brushpass env --token bp_EXAMPLE…)"
+$ eval "$(echo "$TOKEN" | brushpass env)"
 ```
 
 PowerShell:
 
 ```console
-PS> brushpass env --token bp_EXAMPLE… --format powershell
+PS> $TOKEN | brushpass env --format powershell
 $env:BRUSHPASS_TOKEN='bp_EXAMPLE_TOKEN_HERE'
 $env:BRUSHPASS_TOKEN_ID='a1b2c3d4'
 ```
@@ -406,7 +412,7 @@ $env:BRUSHPASS_TOKEN_ID='a1b2c3d4'
 JSON:
 
 ```console
-$ brushpass env --token bp_EXAMPLE… --format json
+$ echo "$TOKEN" | brushpass env --format json
 {
   "BRUSHPASS_TOKEN": "bp_EXAMPLE_TOKEN_HERE",
   "BRUSHPASS_TOKEN_ID": "a1b2c3d4",
@@ -955,7 +961,7 @@ one number retires a whole class of tokens. Nobody has to enumerate what
 was outstanding, which is the situation a break-glass exists for.
 
 ```console
-$ brushpass verify bp_EXAMPLE_TOKEN_HERE --scope github:repo:read --json
+$ echo "$TOKEN" | brushpass verify --scope github:repo:read --json
 {"valid": false, "reason": "stale_epoch", "token_id": "a3e5b5f2", "token_epoch": 2, "store_epoch": 3}
 ```
 
@@ -1376,13 +1382,13 @@ Mint, verify, narrow-check, and revoke one token:
 TOKEN_JSON=$(brushpass mint --scope github:rayanalpha/repo:read --ttl 1h --json)
 TOKEN=$(python3 -c "import json,sys; print(json.load(sys.stdin)['token'])" <<< "$TOKEN_JSON")
 TOKEN_ID=$(python3 -c "import json,sys; print(json.load(sys.stdin)['id'])" <<< "$TOKEN_JSON")
-brushpass verify --scope github:rayanalpha/repo:read "$TOKEN" > /dev/null
-if brushpass verify --scope github:rayanalpha/repo:write "$TOKEN" > /dev/null 2>&1; then
+echo "$TOKEN" | brushpass verify --scope github:rayanalpha/repo:read > /dev/null
+if echo "$TOKEN" | brushpass verify --scope github:rayanalpha/repo:write > /dev/null 2>&1; then
   echo "FAIL: write scope should have been denied"; exit 1
 fi
 brushpass list | grep -q "github:rayanalpha/repo:read"
 brushpass revoke "$TOKEN_ID" > /dev/null
-if brushpass verify --scope github:rayanalpha/repo:read "$TOKEN" > /dev/null 2>&1; then
+if echo "$TOKEN" | brushpass verify --scope github:rayanalpha/repo:read > /dev/null 2>&1; then
   echo "FAIL: revoked token should have been denied"; exit 1
 fi
 echo "mint/verify/revoke cycle OK"
