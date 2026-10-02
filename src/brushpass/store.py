@@ -25,13 +25,24 @@ to a verify in the other on the very next call, with no signal, no IPC
 and no shared object. Caching revocation state would be faster and
 wrong: the cache would keep verifying a token that had already been
 killed, for as long as the process lived.
+
+**Mutations are serialised.** Every public mutation (add, revoke,
+revoke_all_live, bump_epoch, prune) runs its reload-modify-save cycle
+under an exclusive lock on ``tokens.lock``. A temp-file+rename makes
+each *write* atomic, but without the lock two writers interleave and the
+loser silently overwrites the winner — a mint racing a nuke would undo
+the nuke. The lock file's inode is never renamed, so the lock actually
+serialises.
 """
 
+import contextlib
+import fcntl
 import hashlib
 import hmac
 import json
 import os
 import tempfile
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -59,6 +70,16 @@ class TokenStore:
     def __init__(self, data_dir: Path):
         self.data_dir = data_dir
         self.tokens_file = data_dir / "tokens.json"
+        # Serialises read-modify-write cycles across processes. A plain
+        # temp-file+rename makes each *write* atomic, but two writers can
+        # still interleave reload->modify->save so the loser overwrites
+        # the winner (a mint racing a nuke silently undoes the nuke).
+        # The lock file's inode is stable — it is never renamed — so an
+        # flock on it serialises every mutation.
+        self._lock_path = data_dir / "tokens.lock"
+        self._lock_guard = threading.RLock()
+        self._lock_depth = 0
+        self._lock_fd: int | None = None
         self._records: dict[str, TokenRecord] = {}
         self._epoch: int = LEGACY_EPOCH
         # Ids deleted by the most recent prune(), empty until one runs.
@@ -175,10 +196,46 @@ class TokenStore:
         and will be denied, whatever its individual ``revoked`` flag says.
         This is the primitive ``nuke`` is built from.
         """
-        self._reload()
-        self._epoch += 1
-        self._save()
-        return self._epoch
+        with self._locked():
+            self._reload()
+            self._epoch += 1
+            self._save()
+            return self._epoch
+
+    # ---- mutation lock -------------------------------------------------
+
+    @contextlib.contextmanager
+    def _locked(self):
+        """Serialise a read-modify-write cycle across processes.
+
+        Every public mutation runs inside this: the reload at the top of
+        the method and the save at the bottom become one atomic step, so
+        a mint can no longer overwrite a nuke (or a revoke) that landed
+        in between. The guard RLock is held for the whole critical
+        section, so threads in this process serialize here; the flock
+        serializes processes. The depth counter makes it reentrant, so
+        nested mutations don't self-deadlock.
+        """
+        with self._lock_guard:
+            if self._lock_depth == 0:
+                fd = os.open(self._lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                except BaseException:
+                    os.close(fd)
+                    raise
+                self._lock_fd = fd
+            self._lock_depth += 1
+            try:
+                yield
+            finally:
+                self._lock_depth -= 1
+                if self._lock_depth == 0:
+                    fd, self._lock_fd = self._lock_fd, None
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    finally:
+                        os.close(fd)
 
     # ---- records ------------------------------------------------------
 
@@ -191,11 +248,12 @@ class TokenStore:
         where a live token is born, so it cannot be minted into a stale
         generation by accident.
         """
-        self._reload()
-        if record.epoch is None:
-            record.epoch = self._epoch
-        self._records[record.id] = record
-        self._save()
+        with self._locked():
+            self._reload()
+            if record.epoch is None:
+                record.epoch = self._epoch
+            self._records[record.id] = record
+            self._save()
 
     def find_by_token(self, plaintext_token: str) -> TokenRecord | None:
         """Find a token record by plaintext token (constant-time comparison)."""
@@ -223,13 +281,14 @@ class TokenStore:
         per-token ``revoked`` flag is the instrument here; verify denies
         the token on the flag alone.
         """
-        self._reload()
-        record = self._records.get(record_id)
-        if record and not record.revoked:
-            record.revoked = True
-            self._save()
-            return True
-        return False
+        with self._locked():
+            self._reload()
+            record = self._records.get(record_id)
+            if record and not record.revoked:
+                record.revoked = True
+                self._save()
+                return True
+            return False
 
     def revoke_all_live(self, now: datetime | None = None) -> list[str]:
         """Revoke every token that is neither revoked nor expired.
@@ -239,17 +298,18 @@ class TokenStore:
         reading the epoch sees one consistent jump rather than a hundred.
         """
         moment = now or datetime.now(UTC)
-        self._reload()
-        changed: list[str] = []
-        for record in self._records.values():
-            if record.revoked or record.is_expired(moment):
-                continue
-            record.revoked = True
-            changed.append(record.id)
-        if changed:
-            self._epoch += 1
-            self._save()
-        return changed
+        with self._locked():
+            self._reload()
+            changed: list[str] = []
+            for record in self._records.values():
+                if record.revoked or record.is_expired(moment):
+                    continue
+                record.revoked = True
+                changed.append(record.id)
+            if changed:
+                self._epoch += 1
+                self._save()
+            return changed
 
     def list_all(self) -> list[TokenRecord]:
         """List all token records."""
@@ -279,20 +339,21 @@ class TokenStore:
         """
         now = datetime.now(UTC)
         cutoff = now - timedelta(days=older_than_days)
-        self._reload()
+        with self._locked():
+            self._reload()
 
-        to_delete = []
-        for record_id, record in self._records.items():
-            if record.revoked and record.expires_at < cutoff:
-                to_delete.append(record_id)
-            elif record.is_expired(now) and record.expires_at < cutoff:
-                to_delete.append(record_id)
+            to_delete = []
+            for record_id, record in self._records.items():
+                if record.revoked and record.expires_at < cutoff:
+                    to_delete.append(record_id)
+                elif record.is_expired(now) and record.expires_at < cutoff:
+                    to_delete.append(record_id)
 
-        for record_id in to_delete:
-            del self._records[record_id]
+            for record_id in to_delete:
+                del self._records[record_id]
 
-        if to_delete:
-            self._save()
+            if to_delete:
+                self._save()
 
-        self.last_pruned = to_delete
-        return len(to_delete)
+            self.last_pruned = to_delete
+            return len(to_delete)
