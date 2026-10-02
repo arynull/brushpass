@@ -24,9 +24,23 @@ from pathlib import Path
 
 from . import detect, sources
 from .detect import Candidate, FingerprintIndex
-from .models import TokenRecord, sanitize_for_display
+from .models import TOKEN_MATERIAL_PATTERN, TokenRecord, sanitize_for_display
 from .scanner import Scanner
 from .store import TokenStore
+
+
+def _redact_location(location: str) -> str:
+    """Redact token-shaped substrings in a scan location.
+
+    The location is a filesystem path — attacker-influenced. A real token
+    can appear in a filename, and the report must never contain token
+    plaintext (THREAT_MODEL trust boundary: no plaintext secret in any
+    output). Token-shaped substrings are redacted; the rest of the path
+    is preserved so the operator can still find the file. The true path
+    is kept in the Finding for the audit record (which the audit writer
+    redacts at write time).
+    """
+    return TOKEN_MATERIAL_PATTERN.sub("<redacted>", location)
 
 # Exit codes. 2 is the documented "live leak found" signal, distinct from
 # 1 (error) and 0 (clean), so a CI job can gate on a leak alone.
@@ -66,7 +80,10 @@ class Finding:
             "label": self.record.label,
             "scope": self.record.scope,
             "fingerprint": self.fingerprint_prefix,
-            "location": self.location,
+            # Redacted: the location is attacker-influenced and can
+            # contain a real token (e.g. in a filename). The report must
+            # never contain token plaintext.
+            "location": _redact_location(self.location),
             "source": self.source,
             "detected_by": self.how,
             "issued_at": self.record.issued_at.isoformat(),
@@ -215,9 +232,11 @@ def render_text(report: ScanReport) -> str:
             lines.append(f"  fingerprint: {finding.fingerprint_prefix}...")
             # The location is a filesystem path — attacker-influenced —
             # so it is sanitized for display. A newline would fake report
-            # lines; an ANSI escape would erase them.
+            # lines; an ANSI escape would erase them. Token-shaped
+            # substrings are redacted: a real token can appear in a
+            # filename, and the report must never contain token plaintext.
             lines.append(
-                f"  location:    {sanitize_for_display(finding.location)}"
+                f"  location:    {_redact_location(sanitize_for_display(finding.location))}"
                 f" (via {finding.how}, source {finding.source})"
             )
             lines.append(f"  issued_at:   {finding.record.issued_at.isoformat()}")
