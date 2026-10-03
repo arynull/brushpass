@@ -129,6 +129,20 @@ class TokenRecord:
     # ("did I kill it?" vs "did it get used?"). Absent on records minted
     # before v1.1.0, which can never have been consumed.
     consumed: bool = False
+    # Original budget for bounded-use tokens (mint --max-uses N). None
+    # means unbounded (multi-use). Kept alongside `remaining` so a
+    # rotation can mint a FRESH token inheriting `max_uses` with FULL
+    # remaining — the fresh token is a new capability with its own
+    # budget, never a refill of the old record (no path may increase
+    # `remaining` on an existing record).
+    max_uses: int | None = None
+    # Uses left for bounded-use tokens. None means unbounded (multi-use,
+    # including every record minted before v1.2.0 that was not single-use).
+    # Decremented exactly once per successful verify by TokenStore.spend;
+    # never incremented by any path. When it reaches 0 the store also sets
+    # `revoked`, so every existing revoked-denial check catches spent
+    # tokens.
+    remaining: int | None = None
 
     @classmethod
     def create(
@@ -142,10 +156,24 @@ class TokenRecord:
         fingerprint: str | None = None,
         credential_label: str | None = None,
         single_use: bool = False,
+        max_uses: int | None = None,
     ) -> tuple["TokenRecord", str]:
         """Create a new token record. Returns (record, plaintext_token)."""
         token_hash = hashlib.sha256(plaintext_token.encode()).hexdigest()
         record_id = token_hash[:8]
+
+        # --once is shorthand for --max-uses 1. The CLI rejects passing
+        # both; here we resolve the budget defensively so a direct caller
+        # cannot mint an inconsistent record.
+        resolved_max = max_uses
+        if single_use and resolved_max is None:
+            resolved_max = 1
+        if resolved_max is not None:
+            if not isinstance(resolved_max, int) or resolved_max < 1:
+                raise ValueError(f"max_uses must be an integer >= 1, got {resolved_max!r}")
+            resolved_remaining: int | None = resolved_max
+        else:
+            resolved_remaining = None
 
         return cls(
             id=record_id,
@@ -159,6 +187,8 @@ class TokenRecord:
             fingerprint=fingerprint,
             credential_label=credential_label,
             single_use=single_use,
+            max_uses=resolved_max,
+            remaining=resolved_remaining,
         ), plaintext_token
 
     @staticmethod
@@ -189,11 +219,38 @@ class TokenRecord:
             "epoch": self.epoch,
             "single_use": self.single_use,
             "consumed": self.consumed,
+            "max_uses": self.max_uses,
+            "remaining": self.remaining,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "TokenRecord":
         """Deserialize from dictionary."""
+        single_use = data.get("single_use", False)
+        consumed = data.get("consumed", False)
+        max_uses = data.get("max_uses")
+        remaining = data.get("remaining")
+        if max_uses is None and remaining is None:
+            # Records minted before v1.2.0 carry neither key. Multi-use
+            # records stay unbounded (None); single-use records derive a
+            # budget of 1 (0 when already consumed).
+            if single_use:
+                max_uses = 1
+                remaining = 0 if consumed else 1
+        elif max_uses is not None and remaining is None:
+            # Budget known but no counter stored: the record was never
+            # spent (a spent record always writes remaining). A consumed
+            # flag without a counter means the budget is gone.
+            remaining = 0 if consumed else max_uses
+        elif max_uses is None and remaining is not None:
+            # Counter without a budget should not happen for new records;
+            # keep the counter and recover a budget so rotation can
+            # inherit one: live budget implies that budget, spent implies
+            # the single-use budget when applicable.
+            if remaining is not None and remaining > 0:
+                max_uses = remaining
+            else:
+                max_uses = 1 if single_use else None
         return cls(
             id=data["id"],
             token_hash=data["token_hash"],
@@ -218,10 +275,14 @@ class TokenRecord:
             # Absent on tokens minted before v1.1.0, which predate
             # single-use tokens. False, not a guess: those records are
             # multi-use and must stay verifiable more than once.
-            single_use=data.get("single_use", False),
+            single_use=single_use,
             # Absent on tokens minted before v1.1.0, which predate
             # single-use tokens and so can never be consumed.
-            consumed=data.get("consumed", False),
+            consumed=consumed,
+            # Absent on tokens minted before v1.2.0, which predate
+            # bounded-use tokens (derived above).
+            max_uses=max_uses,
+            remaining=remaining,
         )
 
     @property

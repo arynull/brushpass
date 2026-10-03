@@ -84,6 +84,21 @@ from .ttl import TTLError, format_expiry, parse_ttl
 SCANNER_COMMANDS = frozenset({"mint", "handoff", "scan"})
 
 
+def _parse_max_uses(text: str) -> int:
+    """Argparse type for --max-uses: an integer >= 1."""
+    try:
+        value = int(text)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            f"invalid --max-uses value '{text}': expected an integer >= 1"
+        ) from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(
+            f"invalid --max-uses value '{text}': expected an integer >= 1"
+        )
+    return value
+
+
 def create_parser() -> argparse.ArgumentParser:
     """Create the argument parser."""
     parser = argparse.ArgumentParser(
@@ -118,12 +133,24 @@ def create_parser() -> argparse.ArgumentParser:
             "already exist; rotating it revokes every live token carrying it"
         ),
     )
-    mint_parser.add_argument(
+    once_group = mint_parser.add_mutually_exclusive_group()
+    once_group.add_argument(
         "--once",
         action="store_true",
         help=(
             "Issue a single-use token: the first successful verify spends "
             "it and every later verify is denied as 'consumed'"
+        ),
+    )
+    once_group.add_argument(
+        "--max-uses",
+        type=_parse_max_uses,
+        default=None,
+        metavar="N",
+        help=(
+            "Issue a bounded-use token that verifies successfully at most "
+            "N times (N >= 1). Mutually exclusive with --once (--once is "
+            "shorthand for --max-uses 1)"
         ),
     )
     mint_parser.add_argument(
@@ -173,7 +200,7 @@ def create_parser() -> argparse.ArgumentParser:
 
     # prune command
     prune_parser = subparsers.add_parser(
-        "prune", help="Delete expired/revoked tokens older than 7 days"
+        "prune", help="Delete expired/revoked tokens (spent budgets go immediately)"
     )
     prune_parser.add_argument(
         "--json", action="store_true", help="Output as JSON"
@@ -588,6 +615,21 @@ def cmd_mint(
             )
             return 1
 
+    # Bounded-use budget. --once is shorthand for --max-uses 1; the
+    # mutually-exclusive argparse group already rejects passing both, and
+    # the custom type rejects N < 1 or non-integers before we get here.
+    # Fail-closed: no token is minted on bad input (we return before add).
+    single_use = bool(getattr(args, "once", False))
+    max_uses = getattr(args, "max_uses", None)
+    if single_use and max_uses is not None:
+        print("Error: --once and --max-uses are mutually exclusive", file=sys.stderr)
+        return 2
+    if max_uses is not None and (not isinstance(max_uses, int) or max_uses < 1):
+        print("Error: --max-uses must be an integer >= 1", file=sys.stderr)
+        return 2
+    if single_use and max_uses is None:
+        max_uses = 1
+
     # Opportunistic prune on mint
     store.prune()
     audit = _audit(config)
@@ -605,16 +647,21 @@ def cmd_mint(
     now = datetime.now(UTC)
     expires_at = now + ttl_delta
 
-    token_record, _ = TokenRecord.create(
-        plaintext_token=plaintext,
-        scope=str(scope),
-        label=args.label,
-        issued_at=now,
-        expires_at=expires_at,
-        fingerprint=_require_scanner(scanner).fingerprint(plaintext),
-        credential_label=credential_label,
-        single_use=args.once,
-    )
+    try:
+        token_record, _ = TokenRecord.create(
+            plaintext_token=plaintext,
+            scope=str(scope),
+            label=args.label,
+            issued_at=now,
+            expires_at=expires_at,
+            fingerprint=_require_scanner(scanner).fingerprint(plaintext),
+            credential_label=credential_label,
+            single_use=single_use,
+            max_uses=max_uses,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
 
     # Store the record
     store.add(token_record)
@@ -647,6 +694,10 @@ def cmd_mint(
             "expires_in": format_expiry(expires_at, now),
             "single_use": token_record.single_use,
         }
+        if token_record.max_uses is not None:
+            output["max_uses"] = token_record.max_uses
+        if token_record.remaining is not None:
+            output["remaining"] = token_record.remaining
         print(json.dumps(output, indent=2))
     else:
         print(f"Token: {plaintext}")
@@ -657,6 +708,8 @@ def cmd_mint(
         if token_record.credential_label:
             print(f"Credential: {token_record.credential_label}")
         print(f"Expires: {expires_at.isoformat()} ({format_expiry(expires_at, now)})")
+        if token_record.remaining is not None and not token_record.single_use:
+            print(f"Uses: {token_record.remaining} of {token_record.max_uses} remaining")
         print()
         if token_record.credential_label:
             print(
@@ -667,6 +720,11 @@ def cmd_mint(
             print(
                 "Single-use token: the first successful verify spends it, and every "
                 "later verify is denied as 'consumed'."
+            )
+        elif token_record.remaining is not None:
+            print(
+                f"Bounded-use token: at most {token_record.max_uses} successful "
+                "verifies; further verifies are denied as 'exhausted'."
             )
         print("Store this token securely - it will not be shown again.")
 
@@ -691,6 +749,12 @@ def cmd_verify(
     heard of — an unknown token is exactly what an attacker produces, and
     a fingerprint is enough to correlate the attempt without ever holding
     the plaintext.
+
+    Bounded-use tokens (mint --max-uses N) decrement exactly once per
+    successful verify via store.spend, inside the store lock. A denied
+    verify never decrements, so an attacker cannot burn the holder's
+    budget with bad inputs. The final successful use audits
+    token.consumed (ids/scope/label only, never plaintext).
     """
     audit = _audit(config)
 
@@ -750,20 +814,32 @@ def cmd_verify(
 
         Returns the deny exit code, or None when the record is live.
         Used twice: once on the first read, and again on a fresh read
-        when a single-use consume loses its race — the token may have
+        when a bounded spend loses its race — the token may have
         died a *different* death in between (operator revoke, nuke,
         expiry), and the audit trail must name the true one instead
-        of assuming it was consumed.
+        of assuming it was exhausted.
         """
         # Check revoked. A consumed token is flagged revoked too (that is
         # how it denies), so this branch has to name the more precise reason
         # first: "consumed" tells the caller the token did exactly one
         # useful thing and is now spent, where "revoked" would suggest
-        # someone killed it while it was still good.
+        # someone killed it while it was still good. An exhausted
+        # bounded-use token is likewise flagged revoked with remaining 0;
+        # it denies as "exhausted", outranking plain "revoked" (and, by
+        # position here, outranking stale/expired/scope too).
         if rec.revoked:
             if rec.consumed:
                 return deny("consumed", "Token already consumed (single-use)", rec)
+            if rec.remaining is not None and rec.remaining == 0:
+                return deny("exhausted", "Token use budget exhausted", rec)
             return deny("revoked", "Token has been revoked", rec)
+        # A zero budget without the revoked flag should not happen (spend
+        # sets both together), but deny it as exhausted anyway rather than
+        # treating a bookkeeping inconsistency as a live token.
+        if rec.remaining is not None and rec.remaining == 0:
+            if rec.single_use:
+                return deny("consumed", "Token already consumed (single-use)", rec)
+            return deny("exhausted", "Token use budget exhausted", rec)
 
         # Check the revocation epoch, before expiry. A token minted before any
         # generation bump is denied here even though its own `revoked` flag is
@@ -803,58 +879,108 @@ def cmd_verify(
     if denial is not None:
         return denial
 
-    # Spend the token, for a single-use one, before reporting success.
-    #
-    # Placement is the whole design: every denial above has returned
-    # already, so a refused verify (wrong scope, expired, unknown) never
-    # reaches this line and therefore never consumes. That is what stops
-    # an attacker from spending somebody else's token by presenting it
-    # with bad inputs — a denial is free.
-    #
-    # Consumption is the last thing before the success print, so what
-    # gets printed is what the store now holds. If it fails, the verify
-    # fails: the operator must never be told a token is good when the
-    # store could not take it.
-    consumed = False
-    if record.single_use:
+    # Bounded-use spend: exactly one decrement per successful verify, and
+    # only on this path. Every denial above has returned already, so a
+    # refused verify (wrong scope, expired, unknown) never reaches this
+    # line and never burns budget — an attacker cannot spend somebody
+    # else's token by presenting it with bad inputs.
+    remaining_now: int | None = None
+    bounded = record.remaining is not None
+    if bounded:
         try:
-            consumed = store.consume(record.id, now)
+            new_remaining = store.spend(record.id, now)
         except StorageError as e:
-            print(f"Error: could not consume single-use token: {e}", file=sys.stderr)
+            print(f"Error: could not spend bounded-use token: {e}", file=sys.stderr)
             return 1
-        if not consumed:
+        if new_remaining is None:
             # Someone else got there first: the token died between the
             # checks above and the write. Re-read it and name the true
             # death — an operator revoke (or nuke, or expiry) racing this
-            # verify must not be mislabelled "consumed", or the audit
+            # verify must not be mislabelled "exhausted", or the audit
             # trail answers the wrong forensic question.
             fresh = store.find_by_id(record.id)
             if fresh is None:
-                # Practically impossible (prune only deletes long-dead
-                # records), but fail closed on the vague side rather than
-                # crash.
-                return deny("consumed", "Token already consumed (single-use)", record)
+                if record.single_use:
+                    return deny("consumed", "Token already consumed (single-use)", record)
+                return deny("exhausted", "Token use budget exhausted", record)
             recheck = refuse_if_dead(fresh)
             if recheck is not None:
                 return recheck
-            # A live record here would mean consume() lied; it cannot
+            # A live record here would mean spend() lied; it cannot
             # happen (revoked never un-revokes, the epoch never goes
-            # down, expiry never un-expires), so report the spend.
-            return deny("consumed", "Token already consumed (single-use)", fresh)
-        # A consumption is audited even though verify successes are not
-        # (see the module docstring): this is the moment a capability
-        # stops existing. Ids, scope and label — never the plaintext.
-        _record(
-            audit,
-            EVENT_TOKEN_CONSUMED,
-            {
-                "token_id": record.id,
-                "scope": record.scope,
-                "label": record.label,
-            },
-        )
+            # down, expiry never un-expires, remaining never increases),
+            # so report the spend.
+            if fresh.single_use:
+                return deny("consumed", "Token already consumed (single-use)", fresh)
+            return deny("exhausted", "Token use budget exhausted", fresh)
+        remaining_now = new_remaining
+        if new_remaining == 0:
+            # The budget just ran out: this is the moment the capability
+            # stops existing, so it is audited even though verify
+            # successes are not. Ids, scope and label — never plaintext.
+            _record(
+                audit,
+                EVENT_TOKEN_CONSUMED,
+                {
+                    "token_id": record.id,
+                    "scope": record.scope,
+                    "label": record.label,
+                },
+            )
+    else:
+        # Unbounded single-use fallback (pre-v1.2.0 shape without a
+        # derived budget, or any record whose remaining is None but whose
+        # single_use flag is set). Spend the token before reporting
+        # success so what gets printed is what the store now holds.
+        consumed = False
+        if record.single_use:
+            try:
+                consumed = store.consume(record.id, now)
+            except StorageError as e:
+                print(f"Error: could not consume single-use token: {e}", file=sys.stderr)
+                return 1
+            if not consumed:
+                fresh = store.find_by_id(record.id)
+                if fresh is None:
+                    return deny("consumed", "Token already consumed (single-use)", record)
+                recheck = refuse_if_dead(fresh)
+                if recheck is not None:
+                    return recheck
+                return deny("consumed", "Token already consumed (single-use)", fresh)
+            _record(
+                audit,
+                EVENT_TOKEN_CONSUMED,
+                {
+                    "token_id": record.id,
+                    "scope": record.scope,
+                    "label": record.label,
+                },
+            )
+            # Success
+            if args.json:
+                output = {
+                    "valid": True,
+                    "id": record.id,
+                    "scope": record.scope,
+                    "label": record.label,
+                    "issued_at": record.issued_at.isoformat(),
+                    "expires_at": record.expires_at.isoformat(),
+                    "expires_in": format_expiry(record.expires_at, now),
+                    "single_use": record.single_use,
+                    "consumed": True,
+                }
+                print(json.dumps(output, indent=2))
+            else:
+                print("Token valid")
+                print(f"ID: {record.id}")
+                print(f"Scope: {record.scope}")
+                if record.label:
+                    print(f"Label: {record.label}")
+                print(f"Expires in: {format_expiry(record.expires_at, now)}")
+                print("Single-use token consumed - this verify was the last one it allows.")
+            return 0
 
-    # Success
+    # Success (bounded or unbounded multi-use)
     if args.json:
         output = {
             "valid": True,
@@ -865,8 +991,13 @@ def cmd_verify(
             "expires_at": record.expires_at.isoformat(),
             "expires_in": format_expiry(record.expires_at, now),
             "single_use": record.single_use,
-            "consumed": consumed,
+            # A --once token spent by this verify reports consumed, as in
+            # v1.1.0; a bounded --max-uses token reports its budget via
+            # "remaining" instead (consumed stays False for it).
+            "consumed": bool(bounded and record.single_use and remaining_now == 0),
         }
+        if bounded:
+            output["remaining"] = remaining_now
         print(json.dumps(output, indent=2))
     else:
         print("Token valid")
@@ -875,8 +1006,14 @@ def cmd_verify(
         if record.label:
             print(f"Label: {record.label}")
         print(f"Expires in: {format_expiry(record.expires_at, now)}")
-        if consumed:
-            print("Single-use token consumed - this verify was the last one it allows.")
+        if bounded:
+            if remaining_now == 0:
+                if record.single_use:
+                    print("Single-use token consumed - this verify was the last one it allows.")
+                else:
+                    print("This was the last use the budget allows.")
+            else:
+                print(f"Uses left: {remaining_now}")
 
     return 0
 
@@ -907,6 +1044,8 @@ def cmd_list(
                     "expired": r.is_expired(now),
                     "single_use": r.single_use,
                     "consumed": r.consumed,
+                    "max_uses": r.max_uses,
+                    "remaining": r.remaining,
                 }
                 for r in sorted(records, key=lambda x: x.issued_at, reverse=True)
             ]
@@ -926,17 +1065,22 @@ def cmd_list(
         for r in sorted(records, key=lambda x: x.issued_at, reverse=True):
             # "consumed" outranks "revoked": a spent single-use token is
             # also flagged revoked (that is how it denies), but the
-            # operator's question differs. "once" rides along on a token
-            # that is still spendable, so its status says what will
-            # happen to it rather than only what it is now.
+            # operator's question differs. "exhausted" likewise outranks
+            # "revoked" for bounded-use tokens. "once" rides along on a
+            # token that is still spendable, and "<N> left" rides along on
+            # a bounded token that still has budget.
             if r.consumed:
                 status = "consumed"
+            elif r.remaining is not None and r.remaining == 0:
+                status = "exhausted"
             elif r.revoked:
                 status = "revoked"
             else:
                 status = "expired" if r.is_expired(now) else "active"
                 if r.single_use:
                     status = f"{status} once"
+                elif r.remaining is not None:
+                    status = f"{status} {r.remaining} left"
             label = r.label or "-"
             credential = r.credential_label or "-"
             expires_in = format_expiry(r.expires_at, now)
@@ -984,7 +1128,7 @@ def cmd_prune(
     store: TokenStore,
     scanner: Scanner | None,
 ) -> int:
-    """Prune expired/revoked tokens."""
+    """Prune expired/revoked/spent tokens."""
     count = store.prune()
 
     # One record naming what went, not just how many. Skipped on a no-op:
@@ -1004,7 +1148,7 @@ def cmd_prune(
         print(json.dumps(output, indent=2))
     else:
         if count:
-            print(f"Pruned {count} expired/revoked token(s)")
+            print(f"Pruned {count} expired/revoked/spent token(s)")
         else:
             print("No tokens to prune")
 
@@ -1288,6 +1432,9 @@ def cmd_handoff(
 
     # The handoff token's lifecycle is audited like any minted token's:
     # a handoff that left no trace would be a gap in the forensic record.
+    # Handoff tokens are always unbounded (remaining None): the handoff
+    # path never sets or inherits a bounded-use budget, so it cannot
+    # resurrect one either.
     _record(
         audit,
         EVENT_TOKEN_MINT,

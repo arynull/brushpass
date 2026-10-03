@@ -15,8 +15,10 @@ change: everything minted before the bump is behind the current
 generation, so one number retires a whole class of tokens — which is
 exactly what a break-glass has to be able to do when nobody has time to
 enumerate what was outstanding. Single-token ``revoke`` deliberately
-does NOT bump the generation: revoking one token must not retire its
-siblings.
+does NOT bump the generation: revoking one token must not retire sibling
+tokens (that is what ``revoke_all_live`` / ``nuke`` are for). The
+per-token ``revoked`` flag is the instrument here; verify denies
+the token on the flag alone.
 
 **Nothing here is cached.** Every public read goes back to the file. Two
 brushpass processes on the same machine are two :class:`TokenStore`
@@ -33,6 +35,14 @@ each *write* atomic, but without the lock two writers interleave and the
 loser silently overwrites the winner — a mint racing a nuke would undo
 the nuke. The lock file's inode is never renamed, so the lock actually
 serialises.
+
+**Bounded-use budgets only decrease.** ``spend`` decrements ``remaining``
+by exactly one per successful verify and never increments it. No other
+mutation (add, revoke, revoke_all_live, bump_epoch, prune, consume)
+touches ``remaining`` except to carry it unchanged, so no path can
+resurrect budget. Rotation mints a FRESH token: it inherits ``max_uses``
+with FULL remaining — a new capability with its own budget, never a
+refill of the old record.
 """
 
 import contextlib
@@ -341,6 +351,53 @@ class TokenStore:
             self._save()
             return True
 
+    def spend(self, record_id: str, now: datetime | None = None) -> int | None:
+        """Decrement a bounded-use token's budget by exactly one.
+
+        Returns the new ``remaining`` on success, or None when the token
+        must not be spent: missing, unbounded (``remaining is None``),
+        already at zero, revoked, stale, or expired at ``now``. A denied
+        verify must never decrement, so callers only reach here after
+        every deny check has passed; a None here therefore means the
+        record died between the checks and this write (a race), and the
+        caller must re-read and report the true reason.
+
+        When the new remaining is 0 the record is also flagged
+        ``revoked``, so every existing revoked-denial check catches spent
+        tokens. A ``single_use`` record additionally gets ``consumed``,
+        preserving the v1.1.0 ``consumed`` denial reason for the --once
+        path (bounded --max-uses records deny as ``exhausted`` instead).
+
+        No path in this store ever increases ``remaining``: this is the
+        only writer and it only subtracts one. Rotation mints a FRESH
+        token inheriting ``max_uses`` with FULL remaining — a new budget,
+        never a refill.
+        """
+        moment = now or datetime.now(UTC)
+        with self._locked():
+            self._reload()
+            store_epoch = self._epoch
+            record = self._records.get(record_id)
+            if record is None:
+                return None
+            if record.remaining is None:
+                return None
+            if record.remaining <= 0:
+                return None
+            if record.revoked:
+                return None
+            if record.effective_epoch != store_epoch:
+                return None
+            if record.is_expired(moment):
+                return None
+            record.remaining -= 1
+            if record.remaining == 0:
+                record.revoked = True
+                if record.single_use:
+                    record.consumed = True
+            self._save()
+            return record.remaining
+
     def revoke_all_live(self, now: datetime | None = None) -> list[str]:
         """Revoke every token that is neither revoked nor expired.
 
@@ -382,11 +439,19 @@ class TokenStore:
         return record.effective_epoch != self.epoch
 
     def prune(self, older_than_days: int = 7) -> int:
-        """Delete expired+revoked records older than specified days.
+        """Delete dead records: expired, revoked-and-old, and spent budgets.
 
         Returns count of deleted records, and the ids of the records it
         deleted in :attr:`last_pruned`, so the caller can write an audit
         record naming them rather than only counting them.
+
+        Spent tokens (bounded-use with ``remaining == 0``, including
+        consumed single-use tokens) are swept alongside expired ones:
+        their budget is gone and they can never verify again, so keeping
+        them only grows the store. Unlike revoked-but-unexpired tokens
+        (kept until old enough to be forensic noise), a spent token is
+        dead by count rather than by clock and is removed regardless of
+        its expiry.
         """
         now = datetime.now(UTC)
         cutoff = now - timedelta(days=older_than_days)
@@ -395,7 +460,9 @@ class TokenStore:
 
             to_delete = []
             for record_id, record in self._records.items():
-                if record.revoked and record.expires_at < cutoff:
+                if record.remaining is not None and record.remaining == 0:
+                    to_delete.append(record_id)
+                elif record.revoked and record.expires_at < cutoff:
                     to_delete.append(record_id)
                 elif record.is_expired(now) and record.expires_at < cutoff:
                     to_delete.append(record_id)
