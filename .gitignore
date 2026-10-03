@@ -28,3 +28,4 @@ build/
 CHECKLIST.md
 
 .coverage
+.aider*
