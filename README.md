@@ -78,6 +78,15 @@ brushpass mint --scope <provider:resource:permission> [--ttl <duration>] [--labe
   token by presenting it with a wrong scope. Use `--once` for
   one-shot handoffs where replay must be impossible even within the
   TTL window.
+- `--max-uses N`: Issue a bounded-use token that verifies successfully
+  at most N times (N >= 1). Each successful `verify` decrements the
+  budget by one inside the store lock; a denied verify never
+  decrements, so an attacker cannot burn the holder's budget with bad
+  inputs. When the budget runs out the token is revoked and further
+  verifies are denied with reason `exhausted`. `--once` is shorthand
+  for `--max-uses 1` (kept as `consumed` for backward compatibility);
+  passing both `--once` and `--max-uses` is a usage error, as is
+  `--max-uses 0` or a non-integer — no token is minted on bad input.
 
 **Examples:**
 
@@ -93,7 +102,43 @@ brushpass mint --scope stripe:customers:read --ttl 30m
 
 # A one-shot token: dies on its first successful verify
 brushpass mint --scope github:rayanalpha/deploy:write --ttl 10m --label "one deploy" --once
+
+# A three-use token: good for exactly three successful verifies
+brushpass mint --scope github:rayanalpha/deploy:read --ttl 1h --label "three reads" --max-uses 3
 ```
+
+A bounded-use token behaves like this (`N=3`):
+
+```console
+$ echo "$TOKEN" | brushpass verify --scope github:rayanalpha/deploy:read
+Token valid
+ID: a1b2c3d4
+Scope: github:rayanalpha/deploy:read
+Expires in: 59m
+Uses left: 2
+
+$ echo "$TOKEN" | brushpass verify --scope github:rayanalpha/deploy:read
+Token valid
+ID: a1b2c3d4
+Scope: github:rayanalpha/deploy:read
+Expires in: 59m
+Uses left: 1
+
+$ echo "$TOKEN" | brushpass verify --scope github:rayanalpha/deploy:read
+Token valid
+ID: a1b2c3d4
+Scope: github:rayanalpha/deploy:read
+Expires in: 59m
+This was the last use the budget allows.
+
+$ echo "$TOKEN" | brushpass verify --scope github:rayanalpha/deploy:read
+Token use budget exhausted
+```
+
+The fourth verify is denied with reason `exhausted` (in `--json`,
+`"reason": "exhausted"`). The final successful use is audited as
+`token.consumed`, exactly once; denials are audited as
+`token.verify_denied`.
 
 **Output:**
 
@@ -123,13 +168,21 @@ brushpass verify --from-env MY_TOKEN --scope <required-scope>
 
 **Exit codes:**
 - `0`: Token is valid
-- `1`: Token invalid (unknown, expired, revoked, consumed, or scope mismatch)
+- `1`: Token invalid (unknown, expired, revoked, consumed, exhausted, or scope mismatch)
 
 A verify that succeeds on a `--once` token spends it: the success
 output notes the consumption, and a second verify of the same token
 is denied with reason `consumed` (audited as a verify denial, like
 every other refusal). The spend itself is audited as
 `token.consumed`.
+
+A verify that succeeds on a `--max-uses N` token decrements its
+budget by one (atomically, under the store lock) and reports
+`Uses left: <remaining>` — or `This was the last use the budget
+allows.` on the final one. In `--json` success output the remaining
+budget appears as `"remaining": <int>`. A denied verify never
+decrements, so probing with a wrong scope cannot burn the budget.
+Once the budget is spent the token denies with reason `exhausted`.
 
 **Examples:**
 
@@ -177,12 +230,16 @@ def67890 stripe:customers:read               -               -               exp
 ghi11111 aws:s3:bucket:*                     backup          -               12h          revoked
 jkl22222 github:rayanalpha/deploy:write      one deploy      -               9m           active once
 mno33333 github:rayanalpha/deploy:write      one deploy      -               9m           consumed
+pqr44444 github:rayanalpha/deploy:read       three reads     -               55m          active 2 left
+stu55555 github:rayanalpha/deploy:read       three reads     -               55m          exhausted
 ```
 
 Statuses: `active`, `expired`, `revoked`, and for single-use tokens
 `active once` (still spendable) and `consumed` (spent by its one
 verify — distinct from `revoked`, which means an operator killed it
-before it was used).
+before it was used). Bounded-use tokens (`--max-uses N`) show
+`active <N> left` while budget remains and `exhausted` once the
+budget is spent.
 
 ### revoke
 
@@ -205,7 +262,10 @@ epoch.)
 
 ### prune
 
-Delete expired and revoked tokens older than 7 days.
+Delete expired and revoked tokens older than 7 days, plus spent
+bounded-use budgets (consumed/exhausted, `remaining == 0`) which are
+swept immediately — their count is gone and they can never verify
+again, so keeping them only grows the store.
 
 ```bash
 brushpass prune
@@ -963,6 +1023,8 @@ name:
 | Reason | Logged |
 |---|---|
 | `revoked` | `token_id` |
+| `consumed` | `token_id` |
+| `exhausted` | `token_id` |
 | `stale_epoch` | `token_id`, `token_epoch`, `store_epoch` |
 | `expired` | `token_id` |
 | `scope_mismatch` | `token_id`, `granted_scope`, `required_scope` |
@@ -971,6 +1033,11 @@ name:
 An unknown token is exactly what an attacker produces, so it is worth
 recording; the sha256 lets you correlate repeated attempts without ever
 storing what was presented.
+
+The one exception is the final successful use of a bounded budget:
+spending the last use (`--once` or `--max-uses N`) is audited as
+`token.consumed` (ids, scope, label only — never plaintext), because
+that is the moment a capability stops existing.
 
 Audit writes are **best effort**. A damaged or unwritable log prints
 `WARNING: audit write failed: …` and the operation continues — a mint
@@ -1371,6 +1438,8 @@ All verification failures return a non-zero exit code:
 - Revoked token → deny
 - Scope mismatch → deny
 - Token from a retired generation (`stale_epoch`) → deny
+- Spent single-use token (`consumed`) → deny
+- Spent bounded-use budget (`exhausted`) → deny
 
 ### File Permissions
 
@@ -1445,6 +1514,22 @@ fi
 brushpass list | grep -q "consumed"
 echo "$ONCE_TOKEN" | brushpass verify --scope github:rayanalpha/repo:read --json | grep -q '"reason": "consumed"'
 echo "single-use cycle OK"
+```
+
+A bounded-use token allows exactly N successful verifies:
+
+```bash-test
+BOUNDED_JSON=$(brushpass mint --scope github:rayanalpha/repo:read --ttl 1h --label bounded-demo --max-uses 3 --json)
+BOUNDED_TOKEN=$(python3 -c "import json,sys; print(json.load(sys.stdin)['token'])" <<< "$BOUNDED_JSON")
+echo "$BOUNDED_TOKEN" | brushpass verify --scope github:rayanalpha/repo:read > /dev/null
+echo "$BOUNDED_TOKEN" | brushpass verify --scope github:rayanalpha/repo:read > /dev/null
+echo "$BOUNDED_TOKEN" | brushpass verify --scope github:rayanalpha/repo:read > /dev/null
+if echo "$BOUNDED_TOKEN" | brushpass verify --scope github:rayanalpha/repo:read > /dev/null 2>&1; then
+  echo "FAIL: fourth verify of a 3-use token should have been denied"; exit 1
+fi
+echo "$BOUNDED_TOKEN" | brushpass verify --scope github:rayanalpha/repo:read --json | grep -q '"reason": "exhausted"'
+brushpass list | grep -q "exhausted"
+echo "bounded-use cycle OK"
 ```
 
 Plant a leak, find it, fix it:

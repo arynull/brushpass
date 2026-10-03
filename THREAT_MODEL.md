@@ -82,7 +82,9 @@ promise. If you operate brushpass, read this before trusting it.
    sampling choice; the log stays a forensic record of refusals.
    The one exception is a single-use token (`mint --once`): its
    consumption *is* audited as `token.consumed`, because that is the
-   moment a capability stops existing.
+   moment a capability stops existing. The same holds for the final
+   use of a bounded-use token (`mint --max-uses N`): exactly one
+   `token.consumed` record marks the exhaustion.
 2. Pre-v0.3.0 tokens have no fingerprint and cannot be scan-matched;
    they are reported as UNSCANNABLE, not silently covered.
 3. The `manual` provider cannot revoke upstream; rotation reports this
@@ -96,6 +98,16 @@ promise. If you operate brushpass, read this before trusting it.
    processes that both passed every check still resolve to one
    winner and one `consumed` denial — the guarantee is
    exactly-once *spend*, not exactly-once *attempt*.
+6. Bounded-use tokens (`mint --max-uses N`) narrow the replay window to
+   N successful verifies rather than closing it: a stolen token is
+   usable at most N times, and the decrement is atomic under the store
+   lock, so K concurrent verifiers produce exactly N winners and K-N
+   `exhausted` denials. Denied verifies never decrement, so probing
+   cannot burn the budget. The honest residual is the same as for
+   single-use: the budget is judged at check time, so two verifiers
+   that both passed every check still resolve to one winner per
+   remaining unit — the guarantee is exactly-N *spends*, not
+   exactly-N *attempts*.
 
 ## Security contacts
 
