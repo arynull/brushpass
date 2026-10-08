@@ -17,10 +17,14 @@ pip install brushpass
 Or from source:
 
 ```bash
-git clone https://github.com/rayanalpha/brushpass.git
+git clone https://github.com/arynull/brushpass.git
 cd brushpass
 pip install -e .
 ```
+
+Dependency floor: brushpass requires `cryptography>=46.0.7` — a fail-closed
+floor against CVE-2026-39892 (buffer overflow via non-contiguous buffers) and
+the related 46.0.x fixes, so pip refuses vulnerable builds.
 
 ## Quick Start
 

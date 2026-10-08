@@ -109,8 +109,16 @@ promise. If you operate brushpass, read this before trusting it.
    remaining unit — the guarantee is exactly-N *spends*, not
    exactly-N *attempts*.
 
+7. Supply chain: only two runtime dependencies (PyYAML, cryptography),
+   and the floor is fail-closed — `cryptography>=46.0.7` refuses the
+   45.x–46.0.6 range affected by CVE-2026-39892, CVE-2026-34073 and
+   CVE-2026-26007; YAML is always parsed with `safe_load`. Residual: a
+   compromised-but-signed release of a dependency is not caught locally —
+   pinning beyond the floor is the operator's call. A `pip-audit` CI job
+   and a floor regression test are planned in a follow-up run.
+
 ## Security contacts
 
 This is a personal open-source project. Report vulnerabilities by
-opening a GitHub issue on `rayanalpha/brushpass` — do not include live
+opening a GitHub issue on `arynull/brushpass` — do not include live
 credentials in the report.
