@@ -22,9 +22,15 @@ cd brushpass
 pip install -e .
 ```
 
-Dependency floor: brushpass requires `cryptography>=46.0.7` — a fail-closed
-floor against CVE-2026-39892 (buffer overflow via non-contiguous buffers) and
-the related 46.0.x fixes, so pip refuses vulnerable builds.
+Dependency floor: brushpass requires `cryptography>=50.0.0` — a fail-closed
+floor against CVE-2026-39892 (buffer overflow via non-contiguous buffers),
+CVE-2026-34073 and CVE-2026-26007 (46.x fixes), plus CVE-2026-69247
+(Bleichenbacher oracle in the PKCS#7 decrypt paths, fixed 50.0.0),
+CVE-2026-69249 (certificate path-building DoS, fixed 49.0.0) and
+CVE-2026-69248 (wildcard DNS name-constraint escape, fixed 49.0.0), so pip
+refuses vulnerable builds. brushpass itself only uses Fernet, Ed25519 and
+HMAC from this library — none of the vulnerable APIs — the floor is
+defense-in-depth. `pip-audit` runs in CI to catch future advisories.
 
 ## Quick Start
 
