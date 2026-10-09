@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "brushpass"
-version = "1.2.1"
+version = "1.2.2"
 description = "Local credential broker for AI agents - ephemeral token minting and closed-loop rotation"
 readme = "README.md"
 license = {text = "MIT"}
@@ -22,7 +22,7 @@ classifiers = [
 ]
 dependencies = [
     "PyYAML>=6.0",
-    "cryptography>=46.0.7",
+    "cryptography>=50.0.0",
 ]
 
 [project.scripts]
