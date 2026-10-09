@@ -59,6 +59,7 @@ jobs:
       - name: Install brushpass and pip-audit
         run: |
           python -m venv /tmp/audit-venv
+          /tmp/audit-venv/bin/pip install --quiet --upgrade pip
           /tmp/audit-venv/bin/pip install --quiet .
           /tmp/audit-venv/bin/pip install --quiet pip-audit
       - name: Fail on known vulnerabilities
