@@ -7,7 +7,7 @@ import json
 import os
 import sys
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from . import __version__
@@ -1087,6 +1087,19 @@ def cmd_list(
             print(
                 f"{r.id:<8} {r.scope:<35} {label:<15} {credential:<15} "
                 f"{expires_in:<12} {status}"
+            )
+
+    # Warn on live tokens expiring within 24h, after the normal list
+    # output so the human table and --json payload are unchanged.
+    # Expired, revoked, and consumed tokens get no warning.
+    warn_window = timedelta(hours=24)
+    for r in sorted(records, key=lambda x: x.issued_at, reverse=True):
+        if r.revoked or r.consumed or r.is_expired(now):
+            continue
+        if r.expires_at - now <= warn_window:
+            print(
+                f"WARNING: token {r.id} expires in {format_expiry(r.expires_at, now)}",
+                file=sys.stderr,
             )
 
     return 0
