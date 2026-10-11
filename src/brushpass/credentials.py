@@ -73,6 +73,7 @@ def _fernet_types():
         ) from exc
     return Fernet, InvalidToken
 
+
 CREDENTIALS_KEY_NAME = "credentials.key"
 CREDENTIALS_FILE_NAME = "credentials.json"
 CREDENTIALS_KEY_MODE = 0o600
@@ -180,9 +181,7 @@ def split_config(config: dict) -> tuple[dict, dict]:
         CredentialError: if config is not a mapping.
     """
     if not isinstance(config, dict):
-        raise CredentialError(
-            f"Credential config must be a mapping, got {type(config).__name__}"
-        )
+        raise CredentialError(f"Credential config must be a mapping, got {type(config).__name__}")
     plain: dict = {}
     secret: dict = {}
     for key, value in config.items():
@@ -364,7 +363,6 @@ class CredentialRecord:
             "rotation_count": self.rotation_count,
             "config": redact_config(self.config) if redact else self.config,
         }
-
 
     @classmethod
     def from_dict(cls, data: dict) -> "CredentialRecord":
@@ -550,9 +548,7 @@ class CredentialStore:
             # could not persist.
             self._save()
 
-    def _decrypt_secret_config(
-        self, raw_ciphertext: str, key: bytes, label: str
-    ) -> dict:
+    def _decrypt_secret_config(self, raw_ciphertext: str, key: bytes, label: str) -> dict:
         """Decrypt a credential entry's secret config half.
 
         Empty (or missing) means the entry has no secret config.
@@ -598,9 +594,7 @@ class CredentialStore:
                 for record in self._records.values()
             ],
         }
-        fd, temp_name = tempfile.mkstemp(
-            dir=self.data_dir, prefix=".credentials-", suffix=".tmp"
-        )
+        fd, temp_name = tempfile.mkstemp(dir=self.data_dir, prefix=".credentials-", suffix=".tmp")
         temp_file = Path(temp_name)
         try:
             with os.fdopen(fd, "w") as f:
@@ -855,9 +849,7 @@ class CredentialStore:
         """
         ciphertext = self._ciphertexts.get(record.label)
         if ciphertext is None:
-            raise CredentialError(
-                f"Internal error: no ciphertext held for '{record.label}'"
-            )
+            raise CredentialError(f"Internal error: no ciphertext held for '{record.label}'")
         previous_record = self._records.get(record.label)
         previous_secret = self._secrets.get(record.label)
         previous_secret_config = self._secret_configs.get(record.label)

@@ -52,9 +52,7 @@ class Scanner:
 
     def fingerprint(self, plaintext_token: str) -> str:
         """Return the stored fingerprint for a plaintext token."""
-        digest = hmac.new(
-            self.key, plaintext_token.encode(), sha256
-        ).hexdigest()
+        digest = hmac.new(self.key, plaintext_token.encode(), sha256).hexdigest()
         return digest[:FINGERPRINT_CHARS]
 
     def matches(self, plaintext_token: str, fingerprint: str) -> bool:

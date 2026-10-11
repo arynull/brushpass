@@ -278,9 +278,7 @@ class FingerprintIndex:
 
     def fingerprint(self, plaintext: str) -> str:
         """The fingerprint brushpass would store for a plaintext token."""
-        return hmac.new(self._key, plaintext.encode(), sha256).hexdigest()[
-            :FINGERPRINT_CHARS
-        ]
+        return hmac.new(self._key, plaintext.encode(), sha256).hexdigest()[:FINGERPRINT_CHARS]
 
     def lookup(self, candidate: bytes) -> TokenRecord | None:
         """Return the record for a candidate, or None if never issued."""

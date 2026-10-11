@@ -42,6 +42,7 @@ def _redact_location(location: str) -> str:
     """
     return TOKEN_MATERIAL_PATTERN.sub("<redacted>", location)
 
+
 # Exit codes. 2 is the documented "live leak found" signal, distinct from
 # 1 (error) and 0 (clean), so a CI job can gate on a leak alone.
 EXIT_CLEAN = 0
@@ -164,9 +165,7 @@ def scan_blobs(
         if blob.note:
             # The location is attacker-influenced (a filename); sanitize
             # it for display so a newline/escape cannot spoof the report.
-            report.notes.append(
-                f"{sanitize_for_display(blob.location)}: {blob.note}"
-            )
+            report.notes.append(f"{sanitize_for_display(blob.location)}: {blob.note}")
 
         report.blobs_scanned += 1
         for candidate in detect.find_candidates(blob.data or b"", blob.source):
@@ -174,9 +173,7 @@ def scan_blobs(
             if record is None:
                 continue
             report.leaks_verified += 1
-            report.findings.append(
-                _finding(record, candidate, blob, moment)
-            )
+            report.findings.append(_finding(record, candidate, blob, moment))
 
     report.unscannable = [r for r in store.list_all() if not r.fingerprint]
     return report
@@ -257,8 +254,7 @@ def render_text(report: ScanReport) -> str:
         lines.append("UNSCANNABLE TOKENS")
         lines.append("-" * 80)
         lines.append(
-            f"{len(report.unscannable)} token(s) carry no fingerprint, so no scan "
-            "can match them."
+            f"{len(report.unscannable)} token(s) carry no fingerprint, so no scan can match them."
         )
         for record in report.unscannable:
             label = record.label or "-"
@@ -286,8 +282,7 @@ def render_text(report: ScanReport) -> str:
 
     if report.live_findings:
         lines.append(
-            f"{len(report.live_findings)} live leak(s). "
-            "Run 'brushpass scan --fix' to revoke them."
+            f"{len(report.live_findings)} live leak(s). Run 'brushpass scan --fix' to revoke them."
         )
     elif report.findings:
         lines.append("All leaked tokens are already revoked or expired.")

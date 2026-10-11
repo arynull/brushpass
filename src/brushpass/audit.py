@@ -115,14 +115,14 @@ _HASH_EXCLUDED = ("record_hash", "signature")
 
 # Events. Dotted, lowercase, past-tense verbs, so the set reads as a list
 # of things that happened rather than a set of nouns.
-EVENT_TOKEN_MINT = "token.mint"
-EVENT_TOKEN_REVOKE = "token.revoke"
-EVENT_TOKEN_EXPIRE = "token.expire"
+EVENT_TOKEN_MINT = "token.mint"  # nosec B105 # audit event name, not a credential
+EVENT_TOKEN_REVOKE = "token.revoke"  # nosec B105 # audit event name, not a credential
+EVENT_TOKEN_EXPIRE = "token.expire"  # nosec B105 # audit event name, not a credential
 # A single-use token (mint --once) spent by a successful verify. Unlike
 # an ordinary verify success — which is deliberately unaudited — this
 # one is the moment a capability stops existing, so it leaves a record.
 # Ids and scope only: never the plaintext that just died.
-EVENT_TOKEN_CONSUMED = "token.consumed"
+EVENT_TOKEN_CONSUMED = "token.consumed"  # nosec B105 # audit event name, not a credential
 EVENT_VERIFY_DENIED = "token.verify_denied"
 EVENT_LEAK_FOUND = "leak.found"
 EVENT_CREDENTIAL_ADD = "credential.add"
@@ -279,7 +279,7 @@ def signing_message(record_hash: str) -> bytes:
         raise AuditError(f"record_hash is not valid hex: {record_hash!r}") from exc
 
 
-def _ed25519() -> tuple[type, type]:
+def _ed25519() -> "tuple[type[Ed25519PrivateKey], type[Ed25519PublicKey]]":
     """Import the Ed25519 primitives on demand, as a pair of classes.
 
     Returns ``(private_key_cls, public_key_cls)``. ``cryptography`` is
@@ -479,9 +479,7 @@ def _redact_token_material(value):
         redacted = False
         out = {}
         for key, item in value.items():
-            new_key, key_hit = (
-                _redact_token_material(key) if isinstance(key, str) else (key, False)
-            )
+            new_key, key_hit = _redact_token_material(key) if isinstance(key, str) else (key, False)
             new_item, item_hit = _redact_token_material(item)
             out[new_key] = new_item
             redacted = redacted or key_hit or item_hit
@@ -574,9 +572,7 @@ class AuditLog:
         # descriptor under the lock, so no other process can append
         # between our read and our write and make the chain disagree
         # with itself.
-        fd = os.open(
-            self.path, os.O_RDWR | os.O_CREAT | os.O_APPEND, AUDIT_LOG_MODE
-        )
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_APPEND, AUDIT_LOG_MODE)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             # The key is generated on first audit *write*, so an install
@@ -606,9 +602,7 @@ class AuditLog:
             }
             record_hash = compute_record_hash(data)
             data["record_hash"] = record_hash
-            data["signature"] = base64.b64encode(
-                key.sign(signing_message(record_hash))
-            ).decode()
+            data["signature"] = base64.b64encode(key.sign(signing_message(record_hash))).decode()
             line = (json.dumps(data, sort_keys=True) + "\n").encode()
             os.write(fd, line)
             os.fsync(fd)
@@ -621,9 +615,7 @@ class AuditLog:
             try:
                 self._write_counter(next_seq, record_hash)
             except OSError as exc:
-                raise AuditError(
-                    f"Cannot write audit counter {self.counter_path}: {exc}"
-                ) from exc
+                raise AuditError(f"Cannot write audit counter {self.counter_path}: {exc}") from exc
         except OSError as exc:
             raise AuditError(f"Cannot append to audit log {self.path}: {exc}") from exc
         finally:
@@ -723,8 +715,7 @@ class AuditLog:
             tail_seq = int(data["seq"])
         except (KeyError, TypeError, ValueError) as exc:
             raise AuditError(
-                f"Refusing to append to {self.path}: the final record has no usable "
-                "sequence number"
+                f"Refusing to append to {self.path}: the final record has no usable sequence number"
             ) from exc
         if tail_seq != expected_seq:
             raise AuditError(
@@ -824,9 +815,7 @@ class AuditLog:
             # The log was not checked — a key this command cannot trust is
             # an operational error, not a broken chain. Reporting it as
             # TAMPERED would name a sequence that was never examined.
-            return VerifyResult(
-                ok=False, records=len(lines), reason=str(exc), error=True
-            )
+            return VerifyResult(ok=False, records=len(lines), reason=str(exc), error=True)
 
         previous = GENESIS_HASH
         for index, line in enumerate(lines):
@@ -971,10 +960,7 @@ def parse_since(text: str) -> timedelta:
     """
     match = SINCE_PATTERN.match((text or "").strip())
     if not match:
-        raise AuditError(
-            f"Invalid --since value '{text}'. Expected a duration like "
-            "30m, 24h or 7d"
-        )
+        raise AuditError(f"Invalid --since value '{text}'. Expected a duration like 30m, 24h or 7d")
     seconds = int(match.group("value")) * SINCE_UNIT_SECONDS[match.group("unit")]
     if seconds <= 0:
         raise AuditError("--since must be a positive duration")

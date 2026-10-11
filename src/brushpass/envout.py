@@ -29,11 +29,11 @@ FORMAT_JSON = "json"
 FORMAT_POWERSHELL = "powershell"
 ENV_FORMATS = (FORMAT_EXPORT, FORMAT_JSON, FORMAT_POWERSHELL)
 
-TOKEN_VAR = "BRUSHPASS_TOKEN"
-TOKEN_ID_VAR = "BRUSHPASS_TOKEN_ID"
+TOKEN_VAR = "BRUSHPASS_TOKEN"  # nosec B105 # env-var name, not a secret value
+TOKEN_ID_VAR = "BRUSHPASS_TOKEN_ID"  # nosec B105 # env-var name, not a secret value
 
 SECRET_WARNING = (
-    "Warning: this output contains secret token material. "
+    "Warning: this output contains secret token material. "  # nosec B105 # message, not a secret
     "Prefer 'brushpass handoff', which revokes the token when the agent exits."
 )
 
@@ -88,9 +88,7 @@ def render(record: TokenRecord, plaintext: str, fmt: str) -> str:
         EnvError: on an unsupported format.
     """
     if fmt not in ENV_FORMATS:
-        raise EnvError(
-            f"Unknown format '{fmt}'. Expected one of: {', '.join(ENV_FORMATS)}"
-        )
+        raise EnvError(f"Unknown format '{fmt}'. Expected one of: {', '.join(ENV_FORMATS)}")
 
     if fmt == FORMAT_EXPORT:
         return (
@@ -99,8 +97,7 @@ def render(record: TokenRecord, plaintext: str, fmt: str) -> str:
         )
     if fmt == FORMAT_POWERSHELL:
         return (
-            f"$env:{TOKEN_VAR}={_ps_quote(plaintext)}\n"
-            f"$env:{TOKEN_ID_VAR}={_ps_quote(record.id)}\n"
+            f"$env:{TOKEN_VAR}={_ps_quote(plaintext)}\n$env:{TOKEN_ID_VAR}={_ps_quote(record.id)}\n"
         )
     return json.dumps(
         {

@@ -35,12 +35,14 @@ SCOPE_PATTERN = re.compile(
 
 class ScopeError(Exception):
     """Invalid scope format."""
+
     pass
 
 
 @dataclass
 class Scope:
     """Parsed scope triple."""
+
     provider: str
     resource: str
     permission: str
@@ -51,8 +53,7 @@ class Scope:
         match = SCOPE_PATTERN.match(scope_str)
         if not match:
             raise ScopeError(
-                f"Invalid scope format: '{scope_str}'. "
-                f"Expected: <provider>:<resource>:<permission>"
+                f"Invalid scope format: '{scope_str}'. Expected: <provider>:<resource>:<permission>"
             )
 
         provider = match.group("provider")
@@ -79,18 +80,15 @@ class Scope:
             (permission, "permission"),
         ):
             if any(
-                unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp", "Cs")
-                or ord(ch) == 0x7F
+                unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp", "Cs") or ord(ch) == 0x7F
                 for ch in part
             ):
                 raise ScopeError(
-                    f"Invalid scope {name}: control and format characters "
-                    "are not allowed"
+                    f"Invalid scope {name}: control and format characters are not allowed"
                 )
             if TOKEN_MATERIAL_PATTERN.search(part):
                 raise ScopeError(
-                    f"Invalid scope {name}: must not contain anything shaped "
-                    "like a brushpass token"
+                    f"Invalid scope {name}: must not contain anything shaped like a brushpass token"
                 )
 
         return cls(provider=provider, resource=resource, permission=permission)

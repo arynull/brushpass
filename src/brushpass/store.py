@@ -67,6 +67,7 @@ LEGACY_EPOCH = 0
 
 class StorageError(Exception):
     """Storage operation failed."""
+
     pass
 
 
@@ -130,8 +131,7 @@ class TokenStore:
                 data = json.load(f)
 
             self._records = {
-                rec["id"]: TokenRecord.from_dict(rec)
-                for rec in data.get("tokens", [])
+                rec["id"]: TokenRecord.from_dict(rec) for rec in data.get("tokens", [])
             }
             # Absent on stores written before v0.5.0, which had no
             # generation counter. Treated as 0, matching LEGACY_EPOCH.
@@ -168,9 +168,7 @@ class TokenStore:
             "tokens": [rec.to_dict() for rec in self._records.values()],
         }
 
-        fd, temp_name = tempfile.mkstemp(
-            dir=self.data_dir, prefix=".tokens-", suffix=".tmp"
-        )
+        fd, temp_name = tempfile.mkstemp(dir=self.data_dir, prefix=".tokens-", suffix=".tmp")
         temp_file = Path(temp_name)
         try:
             with os.fdopen(fd, "w") as f:

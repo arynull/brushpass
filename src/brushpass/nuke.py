@@ -143,8 +143,7 @@ def plan(tokens: TokenStore, credentials=None) -> dict:
     """
     now = datetime.now(UTC)
     live = [
-        record for record in tokens.list_all()
-        if not record.revoked and not record.is_expired(now)
+        record for record in tokens.list_all() if not record.revoked and not record.is_expired(now)
     ]
     return {
         "live_tokens": [r.id for r in live],

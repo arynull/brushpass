@@ -190,9 +190,7 @@ class RotationEngine:
         # Config is validated during planning: `rotate --dry-run` is the
         # cheapest place to discover a broken config, and discovering it
         # before any secret moves is the entire point of a dry run.
-        values = provider.validate_config(
-            self.credentials.get_config(label)
-        )
+        values = provider.validate_config(self.credentials.get_config(label))
 
         context = RotationContext(
             label=label, provider=record.provider, config=values, record=record
@@ -203,9 +201,7 @@ class RotationEngine:
         # middle of them: a note inserted by index would split one
         # provider's numbered instructions apart.
         if not revoke_supported and revoke_note:
-            provider_steps.append(
-                Step(f"Note: {revoke_note}", destructive=False)
-            )
+            provider_steps.append(Step(f"Note: {revoke_note}", destructive=False))
 
         planned = [
             *provider_steps,
@@ -232,9 +228,7 @@ class RotationEngine:
         """Steps for the linked tokens this rotation will revoke."""
         linked = self._linked_tokens(label)
         if not linked:
-            return [
-                Step("Revoke ephemeral tokens linked to this credential (none)")
-            ]
+            return [Step("Revoke ephemeral tokens linked to this credential (none)")]
         return [
             Step(
                 f"Revoke {len(linked)} live ephemeral token(s) linked to "
@@ -293,9 +287,7 @@ class RotationEngine:
         started_at = now_iso()
         record = self.credentials.get(label)
         provider = self._provider_registry(record.provider)
-        values = provider.validate_config(
-            self.credentials.get_config(label)
-        )
+        values = provider.validate_config(self.credentials.get_config(label))
         rotation_id = new_rotation_id()
         old_secret = self.credentials.get_secret(label)
         old_id = secret_digest(old_secret)[:12]
@@ -319,7 +311,11 @@ class RotationEngine:
             result = provider.rotate(old_secret, values)
         except (ProviderError, ConfigError) as exc:
             outcome = self._abort(
-                entry, label, record.provider, started_monotonic, str(exc),
+                entry,
+                label,
+                record.provider,
+                started_monotonic,
+                str(exc),
                 orphan=None,
             )
             self._notify(outcome, notify_stream)
@@ -333,7 +329,11 @@ class RotationEngine:
             self._persist_new_secret(label, new_secret)
         except PersistFailedError as exc:
             outcome = self._abort(
-                entry, label, record.provider, started_monotonic, str(exc),
+                entry,
+                label,
+                record.provider,
+                started_monotonic,
+                str(exc),
                 orphan=new_id,
             )
             self._notify(outcome, notify_stream)
@@ -343,9 +343,11 @@ class RotationEngine:
             # The provider handed back the same secret. Storing it is a
             # no-op, but reporting a rotation would be a lie.
             outcome = self._abort(
-                entry, label, record.provider, started_monotonic,
-                f"Provider '{record.provider}' returned the same secret; "
-                "nothing was rotated",
+                entry,
+                label,
+                record.provider,
+                started_monotonic,
+                f"Provider '{record.provider}' returned the same secret; nothing was rotated",
                 orphan=new_id,
             )
             self._notify(outcome, notify_stream)
@@ -397,8 +399,7 @@ class RotationEngine:
         )
         if not outcome.within_budget:
             outcome.errors.append(
-                f"Rotation took {duration:.1f}s, over the "
-                f"{ROTATION_BUDGET_SECONDS:.0f}s budget"
+                f"Rotation took {duration:.1f}s, over the {ROTATION_BUDGET_SECONDS:.0f}s budget"
             )
             outcome.alerts.append(outcome.errors[-1])
         self._notify(outcome, notify_stream)
@@ -555,6 +556,8 @@ def send_webhook(url: str, payload: dict, timeout: float = WEBHOOK_TIMEOUT) -> N
         headers={"Content-Type": "application/json", "User-Agent": "brushpass/0.4"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+    with urllib.request.urlopen(  # noqa: S310  # nosec B310 # provider https URL
+        request, timeout=timeout
+    ) as response:
         if response.status >= 300:
             raise urllib.error.URLError(f"webhook returned HTTP {response.status}")

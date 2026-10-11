@@ -27,6 +27,7 @@ MAX_TTL_SECONDS = 24 * 3600
 
 class TTLError(Exception):
     """Invalid TTL format or value."""
+
     pass
 
 
@@ -45,8 +46,7 @@ def parse_ttl(ttl_str: str) -> timedelta:
     match = TTL_PATTERN.match(ttl_str.strip())
     if not match:
         raise TTLError(
-            f"Invalid TTL format: '{ttl_str}'. "
-            f"Expected: <number><unit> where unit is s/m/h/d/w"
+            f"Invalid TTL format: '{ttl_str}'. Expected: <number><unit> where unit is s/m/h/d/w"
         )
 
     value = int(match.group("value"))
@@ -58,9 +58,7 @@ def parse_ttl(ttl_str: str) -> timedelta:
     seconds = value * UNIT_SECONDS[unit]
 
     if seconds > MAX_TTL_SECONDS:
-        raise TTLError(
-            f"TTL exceeds maximum of {MAX_TTL} ({MAX_TTL_SECONDS} seconds)"
-        )
+        raise TTLError(f"TTL exceeds maximum of {MAX_TTL} ({MAX_TTL_SECONDS} seconds)")
 
     return timedelta(seconds=seconds)
 

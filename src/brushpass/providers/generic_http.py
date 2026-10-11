@@ -51,7 +51,7 @@ import urllib.parse
 from .base import ConfigError, Provider, ProviderError, RotationResult, Step
 from .http import HTTPError, request
 
-DEFAULT_NEW_SECRET_PATH = "token"
+DEFAULT_NEW_SECRET_PATH = "token"  # nosec B105 # token key name, not a credential
 DEFAULT_TIMEOUT = 10.0
 
 # Only body-carrying methods. A rotation that answers to GET is a
@@ -102,8 +102,7 @@ class GenericHttpProvider(Provider):
         parsed = urllib.parse.urlparse(url)
         if parsed.scheme not in ("http", "https"):
             raise ConfigError(
-                f"generic-http: config 'url' must be an absolute http(s) URL, "
-                f"got '{url}'"
+                f"generic-http: config 'url' must be an absolute http(s) URL, got '{url}'"
             )
         if not parsed.netloc:
             raise ConfigError(f"generic-http: config 'url' has no host: '{url}'")
@@ -143,13 +142,10 @@ class GenericHttpProvider(Provider):
         for name, value in headers.items():
             if not _HEADER_NAME.match(str(name)):
                 raise ConfigError(
-                    f"generic-http: config 'headers' has an invalid header name "
-                    f"'{name}'"
+                    f"generic-http: config 'headers' has an invalid header name '{name}'"
                 )
             if not isinstance(value, str):
-                raise ConfigError(
-                    f"generic-http: config 'headers'['{name}'] must be a string"
-                )
+                raise ConfigError(f"generic-http: config 'headers'['{name}'] must be a string")
             if "{old_secret}" in value and placement != PLACEMENT_HEADER:
                 raise ConfigError(
                     f"generic-http: config 'headers'['{name}'] interpolates "
@@ -163,9 +159,7 @@ class GenericHttpProvider(Provider):
             raise ConfigError("generic-http: config 'body' must be a mapping")
         for key, value in body.items():
             if not isinstance(value, (str, int, float, bool)) and value is not None:
-                raise ConfigError(
-                    f"generic-http: config 'body'['{key}'] must be a scalar"
-                )
+                raise ConfigError(f"generic-http: config 'body'['{key}'] must be a scalar")
 
         path = config.get("new_secret_path") or DEFAULT_NEW_SECRET_PATH
         if not isinstance(path, str) or not path.strip("."):
@@ -221,8 +215,7 @@ class GenericHttpProvider(Provider):
             for name, value in (values.get("headers") or {}).items()
         }
         body = {
-            key: _expand(value, old_secret)
-            for key, value in (values.get("body") or {}).items()
+            key: _expand(value, old_secret) for key, value in (values.get("body") or {}).items()
         }
         query = ""
 
@@ -304,9 +297,7 @@ class GenericHttpProvider(Provider):
                 f"{_redact(str(exc)).replace(secret, '<redacted>')}"
             ) from None
         if status not in (200, 202, 204):
-            raise ProviderError(
-                f"generic-http: revoke endpoint returned HTTP {status}"
-            )
+            raise ProviderError(f"generic-http: revoke endpoint returned HTTP {status}")
 
 
 def extract_path(payload, path: str):

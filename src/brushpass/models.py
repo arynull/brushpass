@@ -49,8 +49,7 @@ def validate_label(label: str | None, what: str = "label") -> None:
     if label is None:
         return
     if any(
-        unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp", "Cs")
-        or ord(ch) == 0x7F
+        unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp", "Cs") or ord(ch) == 0x7F
         for ch in label
     ):
         raise LabelError(
@@ -81,9 +80,7 @@ def sanitize_for_display(value: str) -> str:
     for human-readable rendering only.
     """
     return "".join(
-        "\ufffd"
-        if unicodedata.category(ch) in _UNSAFE_FOR_DISPLAY or ord(ch) == 0x7F
-        else ch
+        "\ufffd" if unicodedata.category(ch) in _UNSAFE_FOR_DISPLAY or ord(ch) == 0x7F else ch
         for ch in value
     )
 

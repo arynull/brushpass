@@ -141,9 +141,7 @@ class Provider:
         The default refuses: a provider that cannot honestly revoke must
         say so rather than silently succeeding.
         """
-        raise ProviderError(
-            f"Provider '{self.name}' does not implement upstream revocation"
-        )
+        raise ProviderError(f"Provider '{self.name}' does not implement upstream revocation")
 
     def describe_config(self) -> str:
         """One-line description of the expected config, for error text."""

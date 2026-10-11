@@ -74,9 +74,7 @@ class ManualProvider(Provider):
         self._reader = reader or read_secret_from_stdin
         # Instructions go to stderr: they are operator guidance, and
         # stdout has to stay a clean data channel for `rotate --json`.
-        self._writer = writer or (
-            lambda line: print(line, file=sys.stderr, flush=True)
-        )
+        self._writer = writer or (lambda line: print(line, file=sys.stderr, flush=True))
 
     def can_revoke(self, config: dict) -> bool:
         return False
@@ -111,13 +109,10 @@ class ManualProvider(Provider):
         for line in self.instructions(_Context(config, self.label or "credential")):
             self._writer(f"  {line}")
         self._writer("")
-        new_secret = self._reader(
-            f"Paste the new secret for '{self.label or 'credential'}': "
-        )
+        new_secret = self._reader(f"Paste the new secret for '{self.label or 'credential'}': ")
         if not new_secret or not new_secret.strip():
             raise ProviderError(
-                "manual: the new secret was empty. The old credential is still "
-                "live and unchanged"
+                "manual: the new secret was empty. The old credential is still live and unchanged"
             )
         if new_secret.strip() == old_secret:
             raise ProviderError(
@@ -132,8 +127,7 @@ class ManualProvider(Provider):
     def revoke(self, secret: str, config: dict) -> None:
         """Always refused: see :attr:`revoke_note`."""
         raise ProviderError(
-            "manual: brushpass cannot revoke this credential upstream. "
-            + self.revoke_note
+            "manual: brushpass cannot revoke this credential upstream. " + self.revoke_note
         )
 
 

@@ -17,7 +17,7 @@ Two invariants drive the design:
 
 import os
 import signal
-import subprocess
+import subprocess  # nosec B404 # fixed argv, no shell
 import sys
 import threading
 import time
@@ -30,8 +30,8 @@ from .scope import Scope, ScopeError
 from .store import TokenStore
 
 # Names brushpass owns inside the child environment.
-TOKEN_ENV_VAR = "BRUSHPASS_TOKEN"
-TOKEN_ID_ENV_VAR = "BRUSHPASS_TOKEN_ID"
+TOKEN_ENV_VAR = "BRUSHPASS_TOKEN"  # nosec B105 # env-var name, not a secret
+TOKEN_ID_ENV_VAR = "BRUSHPASS_TOKEN_ID"  # nosec B105 # env-var name, not a secret
 RESERVED_ENV_VARS = (TOKEN_ENV_VAR, TOKEN_ID_ENV_VAR)
 
 # The only parent variables a child inherits by default.
@@ -133,9 +133,7 @@ def build_child_env(
     for name in keep:
         value = parent_env.get(name)
         if value is None:
-            raise HandoffError(
-                f"--keep-env variable '{name}' is not set in the parent environment"
-            )
+            raise HandoffError(f"--keep-env variable '{name}' is not set in the parent environment")
         child[name] = value
 
     child[TOKEN_ENV_VAR] = plaintext_token
@@ -292,7 +290,9 @@ def run_handoff(
         # the agent's output when stdout is a pipe.
         flush_stdio()
         try:
-            child = subprocess.Popen(command, env=dict(child_env))
+            child = subprocess.Popen(  # nosec B603 # argv, no shell
+                command, env=dict(child_env)
+            )
         except FileNotFoundError:
             say(f"brushpass: command not found: {command[0]}")
             returncode = EXIT_CMD_NOT_FOUND

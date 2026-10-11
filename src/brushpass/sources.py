@@ -27,7 +27,7 @@ summary always says what was *not* looked at.
 """
 
 import os
-import subprocess
+import subprocess  # nosec B404 # fixed argv, no shell
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -160,9 +160,7 @@ def _read_file(path: Path, source: str) -> Blob | None:
     return Blob(location=location, source=source, data=data)
 
 
-def scan_git(
-    cwd: Path | None = None, state_dir: Path | None = None
-) -> Iterator[Blob]:
+def scan_git(cwd: Path | None = None, state_dir: Path | None = None) -> Iterator[Blob]:
     """Yield blobs from a repository's history, index and worktree.
 
     Four sources, all funnelling into the same candidate -> verify
@@ -196,9 +194,7 @@ def scan_git(
         if len(payload) > MAX_GIT_BYTES:
             note = f"truncated to {MAX_GIT_BYTES} bytes of git output"
             payload = payload[:MAX_GIT_BYTES]
-        yield Blob(
-            location=f"git:{' '.join(args)}", source=source, data=payload, note=note
-        )
+        yield Blob(location=f"git:{' '.join(args)}", source=source, data=payload, note=note)
 
     root = cwd or Path.cwd()
     resolved_state = _resolve(state_dir) if state_dir else None
@@ -223,9 +219,7 @@ def _require_repo(cwd: Path | None) -> None:
     """Fail clearly unless ``cwd`` is inside a git repository."""
     result = _try_git(("rev-parse", "--git-dir"), cwd)
     if result is None:
-        raise ScanSourceError(
-            "git not found on PATH; `brushpass scan --git` needs git installed"
-        )
+        raise ScanSourceError("git not found on PATH; `brushpass scan --git` needs git installed")
     if result.returncode != 0:
         where = cwd or Path.cwd()
         raise ScanSourceError(
@@ -234,12 +228,10 @@ def _require_repo(cwd: Path | None) -> None:
         )
 
 
-def _run_git(
-    args: tuple[str, ...], cwd: Path | None
-) -> subprocess.CompletedProcess[str]:
+def _run_git(args: tuple[str, ...], cwd: Path | None) -> subprocess.CompletedProcess[str]:
     """Run a git command that must succeed. Raises ScanSourceError if not."""
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # nosec B603 B607 # fixed git argv, no shell
             ["git", *args],
             cwd=str(cwd) if cwd else None,
             capture_output=True,
@@ -263,16 +255,14 @@ def _run_git(
     return result
 
 
-def _try_git(
-    args: tuple[str, ...], cwd: Path | None
-) -> subprocess.CompletedProcess[str] | None:
+def _try_git(args: tuple[str, ...], cwd: Path | None) -> subprocess.CompletedProcess[str] | None:
     """Probe git without raising.
 
     A missing binary and a non-zero status are both answers here, not
     faults: ``_require_repo`` reports each of them differently.
     """
     try:
-        return subprocess.run(
+        return subprocess.run(  # nosec B603 B607 # fixed git argv, no shell
             ["git", *args],
             cwd=str(cwd) if cwd else None,
             capture_output=True,
@@ -293,9 +283,7 @@ def scan_history(home: Path | None = None) -> Iterator[Blob]:
     """
     root = home or Path.home()
     histfile = os.environ.get("HISTFILE")
-    candidates = (
-        [Path(histfile)] if histfile else [root / name for name in HISTORY_FILES]
-    )
+    candidates = [Path(histfile)] if histfile else [root / name for name in HISTORY_FILES]
 
     seen: set[Path] = set()
     for path in candidates:

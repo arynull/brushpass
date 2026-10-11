@@ -107,9 +107,7 @@ class GitHubAppProvider(Provider):
             if isinstance(expires_in, bool) or not isinstance(expires_in, int):
                 raise _config_error("config 'expires_in' must be an integer of seconds")
             if not 1 <= expires_in <= 86400:
-                raise _config_error(
-                    "config 'expires_in' must be between 1 and 86400 seconds"
-                )
+                raise _config_error("config 'expires_in' must be between 1 and 86400 seconds")
 
     def plan(self, context) -> list[Step]:
         return [
@@ -163,20 +161,14 @@ class GitHubAppProvider(Provider):
                 body=payload or {},
             )
         except HTTPError as exc:
-            raise ProviderError(
-                f"GitHub refused to mint an installation token: {exc}"
-            ) from None
+            raise ProviderError(f"GitHub refused to mint an installation token: {exc}") from None
 
         if status not in (200, 201):
-            raise ProviderError(
-                f"GitHub returned HTTP {status} when minting an installation token"
-            )
+            raise ProviderError(f"GitHub returned HTTP {status} when minting an installation token")
 
         token, expires_at = _extract_token(body)
         if not token:
-            raise ProviderError(
-                "GitHub returned no 'token' field for the installation token"
-            )
+            raise ProviderError("GitHub returned no 'token' field for the installation token")
         return RotationResult(
             new_secret=token,
             expires_at=expires_at,
@@ -187,8 +179,7 @@ class GitHubAppProvider(Provider):
     def revoke(self, secret: str, config: dict) -> None:
         """Always refused: see the module docstring."""
         raise ProviderError(
-            "github-app: installation tokens cannot be revoked through the API. "
-            + self.revoke_note
+            "github-app: installation tokens cannot be revoked through the API. " + self.revoke_note
         )
 
     def _mint_jwt(self, private_key_path: Path, app_id) -> str:
@@ -242,8 +233,7 @@ def _read_private_key(path: Path):
         from cryptography.hazmat.primitives.serialization import load_pem_private_key
     except ImportError as exc:
         raise ProviderError(
-            "github-app rotation needs the 'cryptography' package "
-            "(pip install 'cryptography>=42')"
+            "github-app rotation needs the 'cryptography' package (pip install 'cryptography>=42')"
         ) from exc
     try:
         pem = path.read_bytes()
@@ -270,9 +260,7 @@ def _require_pem(path: Path) -> None:
     except OSError as exc:
         raise _config_error(f"cannot read 'private_key_path' {path}: {exc}") from None
     if b"PRIVATE KEY" not in head:
-        raise _config_error(
-            f"'private_key_path' {path} does not look like a PEM private key"
-        )
+        raise _config_error(f"'private_key_path' {path} does not look like a PEM private key")
 
 
 def _extract_token(body) -> tuple[str | None, str | None]:

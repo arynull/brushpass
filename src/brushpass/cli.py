@@ -105,25 +105,19 @@ def create_parser() -> argparse.ArgumentParser:
         prog="brushpass",
         description="Local credential broker for automated tooling - ephemeral token minting",
     )
-    parser.add_argument(
-        "--version", action="version", version=f"brushpass {__version__}"
-    )
+    parser.add_argument("--version", action="version", version=f"brushpass {__version__}")
 
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
     # mint command
-    mint_parser = subparsers.add_parser(
-        "mint", help="Mint a new ephemeral token"
-    )
+    mint_parser = subparsers.add_parser("mint", help="Mint a new ephemeral token")
     mint_parser.add_argument(
         "--scope", required=True, help="Scope for the token (provider:resource:permission)"
     )
     mint_parser.add_argument(
         "--ttl", default=None, help="Time-to-live (e.g., 30m, 2h, 7d). Default: 2h, Max: 24h"
     )
-    mint_parser.add_argument(
-        "--label", default=None, help="Optional label for the token"
-    )
+    mint_parser.add_argument("--label", default=None, help="Optional label for the token")
     mint_parser.add_argument(
         "--credential",
         dest="credential_label",
@@ -153,14 +147,10 @@ def create_parser() -> argparse.ArgumentParser:
             "shorthand for --max-uses 1)"
         ),
     )
-    mint_parser.add_argument(
-        "--json", action="store_true", help="Output as JSON"
-    )
+    mint_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
     # verify command
-    verify_parser = subparsers.add_parser(
-        "verify", help="Verify a token"
-    )
+    verify_parser = subparsers.add_parser("verify", help="Verify a token")
     verify_parser.add_argument(
         "--from-env",
         dest="from_env",
@@ -172,39 +162,23 @@ def create_parser() -> argparse.ArgumentParser:
             "world-readable in ps and shell history."
         ),
     )
-    verify_parser.add_argument(
-        "--scope", required=True, help="Required scope to check"
-    )
-    verify_parser.add_argument(
-        "--json", action="store_true", help="Output as JSON"
-    )
+    verify_parser.add_argument("--scope", required=True, help="Required scope to check")
+    verify_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
     # list command
-    list_parser = subparsers.add_parser(
-        "list", help="List all tokens"
-    )
-    list_parser.add_argument(
-        "--json", action="store_true", help="Output as JSON"
-    )
+    list_parser = subparsers.add_parser("list", help="List all tokens")
+    list_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
     # revoke command
-    revoke_parser = subparsers.add_parser(
-        "revoke", help="Revoke a token"
-    )
-    revoke_parser.add_argument(
-        "token_id", help="Token ID to revoke"
-    )
-    revoke_parser.add_argument(
-        "--json", action="store_true", help="Output as JSON"
-    )
+    revoke_parser = subparsers.add_parser("revoke", help="Revoke a token")
+    revoke_parser.add_argument("token_id", help="Token ID to revoke")
+    revoke_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
     # prune command
     prune_parser = subparsers.add_parser(
         "prune", help="Delete expired/revoked tokens (spent budgets go immediately)"
     )
-    prune_parser.add_argument(
-        "--json", action="store_true", help="Output as JSON"
-    )
+    prune_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
     # handoff command
     handoff_parser = subparsers.add_parser(
@@ -217,9 +191,7 @@ def create_parser() -> argparse.ArgumentParser:
     handoff_parser.add_argument(
         "--ttl", default=None, help="Time-to-live (e.g., 30m, 2h). Default: 2h, Max: 24h"
     )
-    handoff_parser.add_argument(
-        "--label", default=None, help="Optional label for the token"
-    )
+    handoff_parser.add_argument("--label", default=None, help="Optional label for the token")
     handoff_parser.add_argument(
         "--parent",
         default=None,
@@ -306,16 +278,12 @@ def create_parser() -> argparse.ArgumentParser:
     cred_remove.add_argument("label", help="Label of the credential to remove")
     cred_remove.add_argument("--yes", action="store_true", help="Skip the confirmation")
 
-    cred_status = credential_sub.add_parser(
-        "status", help="Show rotation history for a credential"
-    )
+    cred_status = credential_sub.add_parser("status", help="Show rotation history for a credential")
     cred_status.add_argument("label", help="Label of the credential")
     cred_status.add_argument("--json", action="store_true", help="Output as JSON")
 
     # provider command
-    provider_parser = subparsers.add_parser(
-        "provider", help="Inspect available rotation providers"
-    )
+    provider_parser = subparsers.add_parser("provider", help="Inspect available rotation providers")
     provider_sub = provider_parser.add_subparsers(dest="subcommand", help="Subcommands")
     provider_list = provider_sub.add_parser("list", help="Show available providers")
     provider_list.add_argument("--json", action="store_true", help="Output as JSON")
@@ -327,9 +295,7 @@ def create_parser() -> argparse.ArgumentParser:
     rotate_parser = subparsers.add_parser(
         "rotate", help="Rotate a root credential and revoke what it backs"
     )
-    rotate_parser.add_argument(
-        "label", nargs="?", default=None, help="Credential label to rotate"
-    )
+    rotate_parser.add_argument("label", nargs="?", default=None, help="Credential label to rotate")
     rotate_parser.add_argument(
         "--dry-run", action="store_true", help="Print the plan and change nothing"
     )
@@ -339,12 +305,8 @@ def create_parser() -> argparse.ArgumentParser:
     rotate_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
     # env command
-    env_parser = subparsers.add_parser(
-        "env", help="Print token material in shell format"
-    )
-    env_parser.add_argument(
-        "--id", dest="token_id", default=None, help="Token ID (see note below)"
-    )
+    env_parser = subparsers.add_parser("env", help="Print token material in shell format")
+    env_parser.add_argument("--id", dest="token_id", default=None, help="Token ID (see note below)")
     env_parser.add_argument(
         "--format",
         choices=ENV_FORMATS,
@@ -369,9 +331,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
     audit_sub = audit_parser.add_subparsers(dest="subcommand", help="Subcommands")
 
-    audit_verify = audit_sub.add_parser(
-        "verify", help="Replay the hash chain from seq 0"
-    )
+    audit_verify = audit_sub.add_parser("verify", help="Replay the hash chain from seq 0")
     audit_verify.add_argument("--json", action="store_true", help="Output as JSON")
 
     audit_log = audit_sub.add_parser("log", help="Show recent audit records")
@@ -416,9 +376,7 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Also attempt a real provider rotation for each credential",
     )
-    nuke_parser.add_argument(
-        "--json", action="store_true", help="Output the plan as JSON"
-    )
+    nuke_parser.add_argument("--json", action="store_true", help="Output the plan as JSON")
 
     return parser
 
@@ -488,8 +446,7 @@ def _audit_verify(args, config) -> int:
         # The chain was not checked — a key this command cannot trust is
         # an operational problem, not tamper. No "TAMPERED", no backup
         # advice: restoring a backup cannot fix a file mode.
-        print(f"Error: cannot verify the audit log: {result.reason}",
-              file=sys.stderr)
+        print(f"Error: cannot verify the audit log: {result.reason}", file=sys.stderr)
     else:
         print(f"TAMPERED: record {result.broken_seq}: {result.reason}", file=sys.stderr)
         print(
@@ -509,8 +466,7 @@ def _audit_log(args, config) -> int:
         return 1
     if args.event is not None and args.event not in EVENTS:
         print(
-            f"Error: unknown event '{args.event}'. Expected one of: "
-            f"{', '.join(EVENTS)}",
+            f"Error: unknown event '{args.event}'. Expected one of: {', '.join(EVENTS)}",
             file=sys.stderr,
         )
         return 1
@@ -526,9 +482,7 @@ def _audit_log(args, config) -> int:
         return 1
 
     try:
-        records = _audit(config).tail(
-            event=args.event, since=since, limit=args.tail
-        )
+        records = _audit(config).tail(event=args.event, since=since, limit=args.tail)
     except AuditError as e:
         print(f"Error: cannot read the audit log: {e}", file=sys.stderr)
         return 1
@@ -683,7 +637,7 @@ def cmd_mint(
 
     # Output
     if args.json:
-        output = {
+        output: dict[str, bool | str | int | None] = {
             "id": token_record.id,
             "token": plaintext,
             "scope": token_record.scope,
@@ -712,10 +666,7 @@ def cmd_mint(
             print(f"Uses: {token_record.remaining} of {token_record.max_uses} remaining")
         print()
         if token_record.credential_label:
-            print(
-                f"Rotating credential '{token_record.credential_label}' will revoke "
-                "this token."
-            )
+            print(f"Rotating credential '{token_record.credential_label}' will revoke this token.")
         if token_record.single_use:
             print(
                 "Single-use token: the first successful verify spends it, and every "
@@ -867,8 +818,7 @@ def cmd_verify(
         if not granted_scope.covers(required_scope):
             return deny(
                 "scope_mismatch",
-                f"Scope mismatch: token has '{rec.scope}', required "
-                f"'{required_scope}'",
+                f"Scope mismatch: token has '{rec.scope}', required '{required_scope}'",
                 rec,
                 granted_scope=rec.scope,
                 required_scope=str(required_scope),
@@ -1057,8 +1007,7 @@ def cmd_list(
             return 0
 
         print(
-            f"{'ID':<8} {'SCOPE':<35} {'LABEL':<15} "
-            f"{'CREDENTIAL':<15} {'EXPIRES':<12} {'STATUS'}"
+            f"{'ID':<8} {'SCOPE':<35} {'LABEL':<15} {'CREDENTIAL':<15} {'EXPIRES':<12} {'STATUS'}"
         )
         print("-" * 100)
 
@@ -1084,10 +1033,7 @@ def cmd_list(
             label = r.label or "-"
             credential = r.credential_label or "-"
             expires_in = format_expiry(r.expires_at, now)
-            print(
-                f"{r.id:<8} {r.scope:<35} {label:<15} {credential:<15} "
-                f"{expires_in:<12} {status}"
-            )
+            print(f"{r.id:<8} {r.scope:<35} {label:<15} {credential:<15} {expires_in:<12} {status}")
 
     # Warn on live tokens expiring within 24h, after the normal list
     # output so the human table and --json payload are unchanged.
@@ -1462,9 +1408,7 @@ def cmd_handoff(
     )
 
     try:
-        child_env = build_child_env(
-            os.environ, session.plaintext, session.token_id, keep
-        )
+        child_env = build_child_env(os.environ, session.plaintext, session.token_id, keep)
     except HandoffError as e:
         # Could not build the environment; never leave the token live.
         if store.revoke(session.token_id):
@@ -1561,9 +1505,7 @@ def _read_token(args) -> str:
             )
         token = value.strip()
         if not token:
-            raise TokenInputError(
-                f"Environment variable '{args.from_env}' is empty"
-            )
+            raise TokenInputError(f"Environment variable '{args.from_env}' is empty")
         return token
 
     if sys.stdin.isatty():
@@ -1583,7 +1525,7 @@ def _read_token(args) -> str:
     if not token:
         raise TokenInputError(
             "No token on stdin. Pipe the token, e.g. "
-            "`echo \"$TOKEN\" | brushpass verify --scope ...`, or use --from-env VAR"
+            '`echo "$TOKEN" | brushpass verify --scope ...`, or use --from-env VAR'
         )
     return token
 
@@ -1598,8 +1540,7 @@ def _parse_config(pairs) -> dict:
     for pair in pairs or []:
         if "=" not in pair:
             raise CredentialError(
-                f"Invalid --set '{pair}'. Expected KEY=VALUE, e.g. "
-                "--set app_id=123456"
+                f"Invalid --set '{pair}'. Expected KEY=VALUE, e.g. --set app_id=123456"
             )
         key, _, value = pair.partition("=")
         key = key.strip()
@@ -1639,9 +1580,7 @@ def _parse_typed_config(pairs) -> dict:
                 )
             config[key] = env_value
             continue
-        if not warned and (
-            is_secret_config_key(key) or is_secret_config_value(value)
-        ):
+        if not warned and (is_secret_config_key(key) or is_secret_config_value(value)):
             # Same class as the argv token ban (trust boundary 2): a live
             # secret on the command line is world-readable in ps and
             # shell history. This checks the *literal* argv value, so a
@@ -1670,8 +1609,7 @@ def cmd_credential(
     """credential add | list | remove | status."""
     if not getattr(args, "subcommand", None):
         print(
-            "Error: choose a subcommand: "
-            "brushpass credential {add,list,remove,status}",
+            "Error: choose a subcommand: brushpass credential {add,list,remove,status}",
             file=sys.stderr,
         )
         return 1
@@ -1749,11 +1687,7 @@ def _cred_list(args, config, credentials, store) -> int:
     if args.json:
         print(
             json.dumps(
-                {
-                    "credentials": [
-                        credentials.render_record(r.label) for r in records
-                    ]
-                },
+                {"credentials": [credentials.render_record(r.label) for r in records]},
                 indent=2,
                 default=str,
             )
@@ -1787,11 +1721,7 @@ def _cred_remove(args, config, credentials, store) -> int:
         return 1
 
     record = credentials.get(args.label)
-    linked = [
-        r.id
-        for r in store.list_all()
-        if r.credential_label == args.label and not r.revoked
-    ]
+    linked = [r.id for r in store.list_all() if r.credential_label == args.label and not r.revoked]
 
     if not args.yes:
         print(f"About to delete credential '{record.label}' (provider: {record.provider}).")
@@ -2074,12 +2004,11 @@ def _render_failure(error: PersistFailedError, as_json: bool) -> int:
     print("=" * 70, file=sys.stderr)
     print(str(error), file=sys.stderr)
     print("", file=sys.stderr)
-    print(
-        f"Orphaned secret ID: {error.orphan_secret_id}", file=sys.stderr
-    )
+    print(f"Orphaned secret ID: {error.orphan_secret_id}", file=sys.stderr)
     print(
         "This identifier is in the rotation journal. It is a digest, so the "
-        "secret\nitself is not recoverable from it.", file=sys.stderr
+        "secret\nitself is not recoverable from it.",
+        file=sys.stderr,
     )
     if as_json:
         print(

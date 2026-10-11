@@ -142,7 +142,7 @@ class JournalEntry:
             f"revoked_tokens={len(self.revoked_tokens)}",
         ]
         if self.error:
-            parts.append(f"error=\"{_one_line(self.error)}\"")
+            parts.append(f'error="{_one_line(self.error)}"')
         return " ".join(parts)
 
 
@@ -238,9 +238,7 @@ class RotationJournal:
         rotation_id is not incomplete: it finished, just slowly.
         """
         entries = self.entries()
-        finished_ids = {
-            entry.rotation_id for entry in entries if entry.is_terminal
-        }
+        finished_ids = {entry.rotation_id for entry in entries if entry.is_terminal}
         return [
             entry
             for entry in entries
@@ -261,10 +259,14 @@ class RotationJournal:
             "last": last.to_dict() if last else None,
             "last_started_at": last.started_at if last else None,
             "last_duration_seconds": last.duration_seconds if last else None,
-            "incomplete": [entry.to_dict() for entry in self.incomplete()
-                           if label is None or entry.label == label],
-            "orphans": [entry.to_dict() for entry in self.orphans()
-                        if label is None or entry.label == label],
+            "incomplete": [
+                entry.to_dict()
+                for entry in self.incomplete()
+                if label is None or entry.label == label
+            ],
+            "orphans": [
+                entry.to_dict() for entry in self.orphans() if label is None or entry.label == label
+            ],
         }
 
 

@@ -52,13 +52,13 @@ def request(
 
     req = urllib.request.Request(url, data=data, headers=request_headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:  # noqa: S310
+        with urllib.request.urlopen(  # noqa: S310  # nosec B310 # provider https URL
+            req, timeout=timeout
+        ) as response:
             status = response.status
             raw = response.read(MAX_RESPONSE_BYTES)
     except urllib.error.HTTPError as exc:
-        raise HTTPError(
-            f"HTTP {exc.code} from {url}: {_excerpt(exc.read())}"
-        ) from None
+        raise HTTPError(f"HTTP {exc.code} from {url}: {_excerpt(exc.read())}") from None
     except urllib.error.URLError as exc:
         # The reason can echo a URL with an embedded token, so only the
         # transport-level reason is surfaced.

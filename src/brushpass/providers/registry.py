@@ -31,16 +31,12 @@ def register(provider: Provider) -> None:
     """
     name = (provider.name or "").strip()
     if not name:
-        raise ProviderError(
-            f"Cannot register {type(provider).__name__}: it has no name"
-        )
+        raise ProviderError(f"Cannot register {type(provider).__name__}: it has no name")
     if name in _REGISTRY:
         raise ProviderError(f"Provider '{name}' is already registered")
     for method in ("rotate", "revoke", "validate_config"):
         if not callable(getattr(provider, method, None)):
-            raise ProviderError(
-                f"Cannot register '{name}': missing required method '{method}'"
-            )
+            raise ProviderError(f"Cannot register '{name}': missing required method '{method}'")
     _REGISTRY[name] = provider
 
 
@@ -55,9 +51,7 @@ def get_provider(name: str) -> Provider:
         return _REGISTRY[name]
     except KeyError:
         available = ", ".join(sorted(_REGISTRY)) or "none"
-        raise ConfigError(
-            f"Unknown provider '{name}'. Available: {available}"
-        ) from None
+        raise ConfigError(f"Unknown provider '{name}'. Available: {available}") from None
 
 
 def available_providers() -> list[Provider]:
