@@ -918,6 +918,8 @@ and finishing, a nuke.
 
 ```bash
 brushpass audit verify          # replay the chain, exit non-zero on tamper
+brushpass audit                 # every record (alias for `audit log`, uncapped)
+brushpass audit --limit 20      # the newest 20 records
 brushpass audit log             # the last 50 records
 brushpass audit log --event token.revoke --since 24h --tail 10
 ```

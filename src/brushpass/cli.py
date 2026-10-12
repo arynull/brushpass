@@ -99,6 +99,21 @@ def _parse_max_uses(text: str) -> int:
     return value
 
 
+def _parse_positive_int(text: str) -> int:
+    """Argparse type for --limit: an integer >= 1."""
+    try:
+        value = int(text)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            f"invalid --limit value '{text}': expected an integer >= 1"
+        ) from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(
+            f"invalid --limit value '{text}': expected an integer >= 1"
+        )
+    return value
+
+
 def create_parser() -> argparse.ArgumentParser:
     """Create the argument parser."""
     parser = argparse.ArgumentParser(
@@ -331,6 +346,18 @@ def create_parser() -> argparse.ArgumentParser:
     )
     audit_sub = audit_parser.add_subparsers(dest="subcommand", help="Subcommands")
 
+    audit_parser.add_argument(
+        "--limit",
+        dest="limit",
+        type=_parse_positive_int,
+        default=None,
+        metavar="N",
+        help=(
+            "With no subcommand (or with `audit log`), show at most the "
+            "newest N records (N >= 1). Default: every record"
+        ),
+    )
+
     audit_verify = audit_sub.add_parser("verify", help="Replay the hash chain from seq 0")
     audit_verify.add_argument("--json", action="store_true", help="Output as JSON")
 
@@ -355,6 +382,14 @@ def create_parser() -> argparse.ArgumentParser:
         default=DEFAULT_TAIL,
         metavar="N",
         help=f"Show at most N records, after filtering (default: {DEFAULT_TAIL})",
+    )
+    audit_log.add_argument(
+        "--limit",
+        dest="limit",
+        type=_parse_positive_int,
+        default=argparse.SUPPRESS,
+        metavar="N",
+        help="Show at most the newest N records (N >= 1). Default: every record",
     )
     audit_log.add_argument("--json", action="store_true", help="Output as JSON")
 
@@ -416,15 +451,27 @@ def cmd_audit(
     store: TokenStore,
     scanner: Scanner | None,
 ) -> int:
-    """audit verify | log."""
+    """audit [verify | log]. No subcommand lists records, like ``log``."""
     subcommand = getattr(args, "subcommand", None)
     if subcommand == "verify":
         return _audit_verify(args, config)
-    if subcommand == "log":
+    if subcommand in (None, "log"):
+        # ``brushpass audit`` with no subcommand is ``brushpass audit log``
+        # uncapped: --limit is the only cap. Fill in the flags the log
+        # handler reads when they were not attached to the parent parser.
+        for name, default in (
+            ("event", None),
+            ("since", None),
+            ("tail", None),
+            ("limit", None),
+            ("json", False),
+        ):
+            if not hasattr(args, name):
+                setattr(args, name, default)
         return _audit_log(args, config)
 
     print(
-        "Error: choose a subcommand: brushpass audit {verify,log}",
+        "Error: choose a subcommand: brushpass audit [{verify,log}]",
         file=sys.stderr,
     )
     return 1
@@ -477,12 +524,15 @@ def _audit_log(args, config) -> int:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
-    if args.tail < 0:
+    # --limit, when given, caps *and* overrides the legacy --tail cap.
+    # Neither given (bare ``brushpass audit``) means show every record.
+    limit = args.limit if args.limit is not None else args.tail
+    if limit is not None and limit < 0:
         print("Error: --tail cannot be negative", file=sys.stderr)
         return 1
 
     try:
-        records = _audit(config).tail(event=args.event, since=since, limit=args.tail)
+        records = _audit(config).tail(event=args.event, since=since, limit=limit)
     except AuditError as e:
         print(f"Error: cannot read the audit log: {e}", file=sys.stderr)
         return 1
